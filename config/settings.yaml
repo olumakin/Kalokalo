@@ -1,0 +1,38 @@
+# DVPE Football Big 5 — hyperparameter configuration
+
+leagues:
+  E0: "English Premier League"
+  SP1: "La Liga"
+  I1: "Serie A"
+  D1: "Bundesliga"
+  F1: "Ligue 1"
+
+data_source:
+  historical_base_url: "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
+  cache_dir: "data/historical"
+  fixtures_dir: "data/fixtures"
+
+model:
+  # Rolling training window, in days (~2 seasons)
+  rolling_window_days: 730
+  min_matches_for_team_rating: 15
+  # Time-decay rate; grid-searched in [0.003, 0.010] during walk-forward validation
+  xi_decay: 0.0065
+  xi_grid: [0.003, 0.004, 0.005, 0.0065, 0.008, 0.010]
+  goal_grid_size: 10
+  max_optimizer_iterations: 500
+  optimizer_method: "L-BFGS-B"
+  rho_init: -0.05
+
+devig:
+  method: "multiplicative"   # "multiplicative" | "shin"
+
+edge:
+  min_ev: 0.03
+  kelly_fraction: 0.15
+  single_match_cap: 0.025
+  daily_slate_cap: 0.08
+
+ledger:
+  path: "data/ledger.parquet"
+  format: "parquet"
