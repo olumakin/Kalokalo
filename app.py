@@ -10,13 +10,15 @@ fully explorable without a network round-trip.
 """
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import streamlit as st
 
-from src.ingestion.demo_data import generate_demo_fixtures, generate_demo_matches
+from src.ingestion.demo_data import generate_demo_matches
 from src.ingestion.historical import load_settings
 from src.ingestion.normalizer import build_display_names, load_team_mappings, normalize_dataframe
-from src.ingestion.odds_feed import fetch_live_odds, load_fixture_csv, normalize_fixture_dataframe
+from src.ingestion.odds_feed import get_upcoming_fixtures
 from src.ingestion.sources import (
     BLEND_CONSENSUS,
     BLEND_STRICT,
@@ -99,11 +101,6 @@ def _cached_demo_matches(league: str, n_teams: int, rounds: int, seed: int) -> p
 
 
 @st.cache_data(show_spinner=False)
-def _cached_demo_fixtures(league: str, n_teams: int, seed: int, n_fixtures: int, fixture_seed: int) -> pd.DataFrame:
-    return generate_demo_fixtures(league=league, n_teams=n_teams, seed=seed, n_fixtures=n_fixtures, fixture_seed=fixture_seed)
-
-
-@st.cache_data(show_spinner=False)
 def _cached_historical_download(leagues: tuple[str, ...], seasons_back: int, _settings: dict) -> pd.DataFrame:
     return load_historical_matches(list(leagues), seasons_back, _settings)
 
@@ -116,17 +113,21 @@ def _cached_blend_sources(
 
 
 @st.cache_data(show_spinner=False)
-def _cached_live_odds(leagues: tuple[str, ...], api_key: str) -> pd.DataFrame:
-    frames = [fetch_live_odds(lg, api_key=api_key or None) for lg in leagues]
-    frames = [f for f in frames if not f.empty]
-    if not frames:
-        return pd.DataFrame(columns=["date", "league", "home_team", "away_team", "odds_home", "odds_draw", "odds_away"])
-    combined = pd.concat(frames, ignore_index=True)
-    # fetch_live_odds returns The Odds API's own raw team-name strings
-    # (e.g. "Manchester City"), not our canonical codes — resolve them
-    # the same way any other fixture source is resolved, or the model
-    # would treat every live fixture as an unseen (league-median) team.
-    return normalize_fixture_dataframe(combined)
+def _cached_upcoming_fixtures(leagues: tuple[str, ...], api_key: str) -> pd.DataFrame:
+    return get_upcoming_fixtures(list(leagues), api_key=api_key or None)
+
+
+def _resolve_odds_api_key() -> str:
+    """ODDS_API_KEY from the environment, then Streamlit secrets if a
+    secrets.toml is configured — st.secrets raises if none exists at
+    all, so that lookup is guarded rather than assumed available."""
+    key = os.environ.get("ODDS_API_KEY", "")
+    if key:
+        return key
+    try:
+        return st.secrets.get("ODDS_API_KEY", "")
+    except Exception:
+        return ""
 
 
 settings = load_settings()
@@ -212,34 +213,17 @@ with st.sidebar:
                          "Off by default — the PID's model is defined on actual goals.",
                 )
 
-    st.header("2. Upcoming fixtures")
-    fixture_source = st.radio(
-        "Source", ["Demo fixtures (offline)", "Sample fixture card", "The Odds API (live consensus)", "Upload CSV"],
-        key="fixture_source_radio",
-    )
-    if fixture_source == "Demo fixtures (offline)":
-        demo_n_fixtures = st.slider("Number of fixtures", 4, 30, 12, key="demo_n_fixtures_slider")
-        demo_fixture_seed = st.number_input("Fixture random seed", value=3, step=1, key="demo_fixture_seed_input")
-    elif fixture_source == "Sample fixture card":
-        fixtures_path = st.text_input("Fixture CSV path", value="data/fixtures/upcoming.csv", key="fixtures_path_input")
-    elif fixture_source == "The Odds API (live consensus)":
-        # The Odds API is a fixture-side source (live upcoming odds only —
-        # no historical endpoint on the free tier), not one of the
-        # blendable historical sources above, so it's scoped to this
-        # section rather than folded into the checkboxes in Section 1.
-        odds_api_leagues = st.multiselect(
-            "Odds API Leagues", league_options, default=league_options,
-            format_func=lambda c: f"{c} — {settings['leagues'][c]}", key="odds_api_leagues_multiselect",
-        )
-        odds_api_key = st.text_input(
-            "Odds API key", type="password", key="odds_api_key_input",
-            help="Falls back to the ODDS_API_KEY environment variable if left blank. "
-                 "Free tier: 500 requests/month, live odds only (no historical endpoint).",
-        )
+    st.header("2. Live Market Feed")
+    st.caption("Upcoming fixtures are fetched automatically — no source to pick.")
+    odds_api_key = _resolve_odds_api_key()
+    if odds_api_key:
+        st.success("✓ Live Odds API Connected")
     else:
-        uploaded_fixtures = st.file_uploader(
-            "Fixture CSV", type="csv", key="uploaded_fixtures_file",
-            help="Columns: date, league, home_team, away_team, odds_home, odds_draw, odds_away",
+        odds_api_key = st.text_input(
+            "Odds API Key", type="password", key="odds_api_key_input",
+            help="Enter your API key, or set ODDS_API_KEY in your environment or Streamlit secrets. "
+                 "Free tier: 500 requests/month, live odds only (no historical endpoint). Left blank, "
+                 "or if the live feed is unreachable, falls back to the bundled sample fixture card.",
         )
 
     st.header("3. Run")
@@ -283,41 +267,25 @@ if run_clicked:
             st.error(f"Model fit failed: {exc}")
             st.stop()
 
-    with st.spinner("Loading fixtures..."):
-        if fixture_source == "Demo fixtures (offline)":
-            fixtures = _cached_demo_fixtures(
-                demo_league if use_demo_history else league_options[0],
-                demo_n_teams if use_demo_history else 10,
-                int(demo_seed) if use_demo_history else 42,
-                demo_n_fixtures, int(demo_fixture_seed),
-            )
-        elif fixture_source == "Sample fixture card":
-            fixtures = load_fixture_csv(fixtures_path)
-        elif fixture_source == "The Odds API (live consensus)":
-            if not odds_api_leagues:
-                st.error("Select at least one league for live odds.")
-                st.stop()
-            fixtures = _cached_live_odds(tuple(odds_api_leagues), odds_api_key)
-            if fixtures.empty:
-                st.error(
-                    "No live odds returned — check the API key (or ODDS_API_KEY env var) and that "
-                    "there are upcoming fixtures in the selected leagues."
-                )
-                st.stop()
-        else:
-            if uploaded_fixtures is None:
-                st.error("Upload a fixture CSV, or switch fixture source.")
-                st.stop()
-            fixtures = normalize_fixture_dataframe(pd.read_csv(uploaded_fixtures))
+    with st.spinner("Fetching upcoming fixtures..."):
+        # Automatic: live consensus odds across every Big 5 league when a
+        # key is available, silently falling back to the bundled sample
+        # fixture card otherwise (get_upcoming_fixtures never raises purely
+        # because the live feed is unreachable). "n_bookmakers" is only
+        # ever present on the live path, so its absence is how the UI
+        # tells the two apart after the fact without changing the return type.
+        fixtures = _cached_upcoming_fixtures(tuple(league_options), odds_api_key)
+        used_live_odds = "n_bookmakers" in fixtures.columns
 
     if fixtures.empty:
-        st.error("No fixtures loaded.")
+        st.error("No fixtures available — live feed and the bundled fixture card both returned nothing.")
         st.stop()
 
     predictions = build_predictions(fixtures, model, settings)
     if record_to_ledger:
         record_ledger(predictions, settings)
 
+    st.session_state["used_live_odds"] = used_live_odds
     st.session_state["model"] = model
     st.session_state["matches"] = matches
     st.session_state["predictions"] = predictions
@@ -359,7 +327,13 @@ else:
     c1.metric("Qualified Plays", f"{len(qualified)} Matches")
     c2.metric("Total Suggested Stake", f"{qualified['stake_pct'].sum():.1%}")
     c3.metric("Top Value", f"+{qualified['ev'].max():.1%}" if not qualified.empty else "—")
-    st.caption(f"Scanned {len(predictions)} fixtures on this slate.")
+
+    feed_note = (
+        "✓ Live consensus odds from The Odds API"
+        if st.session_state.get("used_live_odds")
+        else "ℹ️ Live feed unavailable — showing the bundled sample fixture card"
+    )
+    st.caption(f"Scanned {len(predictions)} fixtures on this slate · {feed_note}")
 
     st.divider()
     st.subheader("🎯 Matchday Value Picks")

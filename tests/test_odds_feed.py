@@ -3,7 +3,8 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
-from src.ingestion.odds_feed import fetch_live_odds
+import src.ingestion.odds_feed as odds_feed_mod
+from src.ingestion.odds_feed import fetch_live_odds, get_upcoming_fixtures
 
 SAMPLE_EVENT = {
     "commence_time": "2026-09-20T14:00:00Z",
@@ -74,3 +75,51 @@ class TestFetchLiveOdds:
         session.get.side_effect = ConnectionError("blocked")
         df = fetch_live_odds("E0", api_key="test-key", session=session)
         assert df.empty
+
+
+@pytest.fixture
+def fallback_csv(tmp_path):
+    path = tmp_path / "upcoming.csv"
+    path.write_text(
+        "date,league,home_team,away_team,odds_home,odds_draw,odds_away\n"
+        "2026-09-20,E0,Arsenal,Chelsea,2.30,3.40,3.10\n"
+    )
+    return path
+
+
+class TestGetUpcomingFixtures:
+    def test_uses_live_odds_when_available(self, monkeypatch, fallback_csv):
+        live_df = pd.DataFrame([{
+            "date": "2026-09-21T15:00:00Z", "league": "E0", "home_team": "Arsenal", "away_team": "Bournemouth",
+            "odds_home": 1.8, "odds_draw": 3.9, "odds_away": 4.2, "n_bookmakers": 4,
+        }])
+        monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", lambda league, api_key=None: live_df)
+
+        result = get_upcoming_fixtures(["E0"], api_key="test-key", fallback_path=fallback_csv)
+
+        assert len(result) == 1
+        assert result.iloc[0]["away_team"] == "BOU"  # resolved via team_mappings, not the fallback file
+
+    def test_falls_back_to_csv_when_no_api_key(self, fallback_csv):
+        result = get_upcoming_fixtures(["E0"], api_key=None, fallback_path=fallback_csv)
+        assert len(result) == 1
+        assert result.iloc[0]["home_team"] == "ARS"
+
+    def test_falls_back_to_csv_when_live_feed_empty_for_every_league(self, monkeypatch, fallback_csv):
+        monkeypatch.setattr(
+            odds_feed_mod, "fetch_live_odds",
+            lambda league, api_key=None: pd.DataFrame(columns=odds_feed_mod.FIXTURE_COLUMNS),
+        )
+        result = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key", fallback_path=fallback_csv)
+        assert len(result) == 1  # from the fallback CSV, not an empty frame
+
+    def test_queries_every_requested_league(self, monkeypatch, fallback_csv):
+        calls = []
+
+        def fake_fetch(league, api_key=None):
+            calls.append(league)
+            return pd.DataFrame(columns=odds_feed_mod.FIXTURE_COLUMNS)
+
+        monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", fake_fetch)
+        get_upcoming_fixtures(["E0", "SP1", "I1"], api_key="test-key", fallback_path=fallback_csv)
+        assert calls == ["E0", "SP1", "I1"]

@@ -40,11 +40,13 @@ pytest
 
 A four-page Streamlit app:
 
-- **Matchday** (`app.py`) — pick a historical data source (offline demo
-  generator, live download, or CSV upload) and a fixture card (demo,
-  sample, or upload), run the pipeline, and see fixtures ranked by EV
-  with xG, model vs. market draw probability, and Kelly stake, qualified
-  bets highlighted.
+- **Matchday** (`app.py`) — pick historical data sources (offline demo
+  generator, or football-data.co.uk + Understat to blend, or a CSV
+  upload), run the pipeline, and see fixtures ranked by EV with xG,
+  model vs. market draw probability, and Kelly stake, qualified bets
+  highlighted. Upcoming fixtures are fetched automatically — live
+  consensus odds from The Odds API if a key is set, otherwise a bundled
+  sample fixture card, with no source to pick.
 - **Model Diagnostics** (`pages/1_Model_Diagnostics.py`) — fitted
   hyperparameters (μ₀, γ, ρ), convergence/fallback status, and per-team
   attack/defense ratings with charts.
@@ -56,9 +58,13 @@ A four-page Streamlit app:
 
 This sandbox has no outbound network access to football-data.co.uk, so
 `src/ingestion/demo_data.py` generates a plausible offline match history
-and fixture card (real team codes, a fitted-model-vs-noisy-market
-dynamic) so the app is fully explorable without a live data source —
-select "Demo data (offline)" / "Demo fixtures (offline)" in the sidebar.
+(real team codes, a fitted-model-vs-noisy-market dynamic) so the app is
+fully explorable without a live data source — "Use offline demo data"
+is checked by default in the sidebar. Fixtures always come from
+`get_upcoming_fixtures` (`src/ingestion/odds_feed.py`): it always tries
+live odds first if a key is present, and transparently falls back to
+`data/fixtures/upcoming.csv` — which is exactly what happens on every
+run in this sandbox, since the live feed is unreachable here.
 
 ## Multi-source data blending
 
@@ -80,10 +86,13 @@ chances. The Matchday sidebar's "Blend online sources" option
     Poisson count data (see that method's docstring).
 - **The Odds API** (`src/ingestion/odds_feed.py:fetch_live_odds`) — a
   *fixture-side* source, not historical: its free tier serves live
-  upcoming odds only. Selecting it under "Upcoming fixtures" averages
-  the 1X2 price across every bookmaker in the response for a genuine
-  multi-book consensus, rather than taking whichever book comes first.
-  Needs an API key (field in the sidebar, or `ODDS_API_KEY` env var).
+  upcoming odds only. `get_upcoming_fixtures` calls it automatically for
+  every Big 5 league and averages the 1X2 price across every bookmaker
+  in the response for a genuine multi-book consensus (not just whichever
+  book comes first), falling back to the sample fixture card if it
+  returns nothing. Needs an API key — the sidebar only asks for one if
+  `ODDS_API_KEY` isn't already set in the environment or
+  `.streamlit/secrets.toml`.
 
 **Not implemented** (real extension points, not fake stubs): **Betfair
 Exchange** — its API-NG requires certificate-based login and a

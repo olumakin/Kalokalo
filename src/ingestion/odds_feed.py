@@ -140,3 +140,39 @@ def fetch_live_odds(
         })
 
     return pd.DataFrame(rows, columns=FIXTURE_COLUMNS + ["n_bookmakers"])
+
+
+def get_upcoming_fixtures(
+    leagues: list[str],
+    api_key: str | None = None,
+    fallback_path: str | Path = "data/fixtures/upcoming.csv",
+) -> pd.DataFrame:
+    """Automatically fetch upcoming fixtures across `leagues` with no
+    caller-side mode selection: live 1X2 consensus odds from The Odds
+    API when a key is available, silently falling back to the curated
+    fixture card at `fallback_path` if the live feed returns nothing at
+    all (no key, every league unreachable, or a quiet API outage) —
+    same never-raise-on-an-unavailable-source pattern as the rest of
+    src/ingestion.
+
+    Deliberately does not raise or emit UI warnings itself — this stays
+    UI-framework-agnostic like every other src/ingestion function (only
+    `logging`, no `streamlit`), so it can be unit-tested without a
+    Streamlit runtime. The caller (app.py) decides how to surface
+    "using cached fixtures" to the user.
+    """
+    frames = []
+    if api_key:
+        for league in leagues:
+            df = fetch_live_odds(league, api_key=api_key)
+            if not df.empty:
+                frames.append(df)
+
+    if frames:
+        combined = pd.concat(frames, ignore_index=True)
+        # fetch_live_odds returns The Odds API's own raw team-name strings
+        # (e.g. "Manchester City"), not our canonical codes.
+        return normalize_fixture_dataframe(combined)
+
+    logger.info("No live odds available for %s; falling back to %s", leagues, fallback_path)
+    return load_fixture_csv(fallback_path)
