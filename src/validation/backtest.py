@@ -77,7 +77,7 @@ class WalkForwardBacktest:
                     except ValueError as exc:
                         logger.warning("Skipping retrain at %s: %s", current_date, exc)
                 else:
-                    logger.info(
+                    logger.debug(
                         "Insufficient training data (%d < %d) as of %s; skipping predictions",
                         len(train_df), self.min_train_matches, current_date,
                     )

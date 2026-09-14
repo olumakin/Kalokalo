@@ -54,7 +54,11 @@ def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: 
             "league": row["league"],
             "home_team": row["home_team"],
             "away_team": row["away_team"],
+            "xg_home": lam,
+            "xg_away": mu,
+            "model_p_home": probs["p_home"],
             "model_p_draw": model_p_draw,
+            "model_p_away": probs["p_away"],
             "market_p_draw": market_d,
             "odds_draw": row["odds_draw"],
             "ev": ev,
@@ -81,19 +85,17 @@ def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: 
     return df.sort_values("ev", ascending=False).reset_index(drop=True)
 
 
-def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path: str | None = None) -> pd.DataFrame:
-    settings = load_settings() if settings_path is None else yaml.safe_load(open(settings_path))
-
+def load_historical_matches(leagues: list[str], seasons_back: int, settings: dict) -> pd.DataFrame:
+    """Download (or read from cache) and normalize Big 5 historical results."""
     end_year = date.today().year
     seasons = season_codes(end_year - seasons_back, end_year)
     logger.info("Ingesting historical data for %s / seasons %s", leagues, seasons)
     raw = load_all(leagues, seasons, cache_dir=settings["data_source"]["cache_dir"])
-    matches = normalize_dataframe(raw)
+    return normalize_dataframe(raw)
 
-    if matches.empty:
-        logger.error("No historical matches available; cannot fit model. Populate data/historical/ or check network access.")
-        return pd.DataFrame()
 
+def fit_model(matches: pd.DataFrame, settings: dict) -> DixonColesModel:
+    """Fit the Dixon-Coles model on a canonical-schema match history."""
     model_cfg = settings["model"]
     model = DixonColesModel(
         min_matches=model_cfg["min_matches_for_team_rating"],
@@ -105,14 +107,12 @@ def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path
         "Model fit: mu0=%.4f gamma=%.4f rho=%.4f converged=%s fallback_used=%s teams=%d",
         model.mu0_, model.gamma_, model.rho_, model.converged_, model.fallback_used_, len(model.teams_),
     )
+    return model
 
-    fixtures = load_fixture_csv(fixtures_path)
-    if fixtures.empty:
-        logger.warning("No fixtures loaded from %s", fixtures_path)
-        return pd.DataFrame()
 
-    predictions = build_predictions(fixtures, model, settings)
-
+def record_ledger(predictions: pd.DataFrame, settings: dict) -> None:
+    if predictions.empty:
+        return
     ledger = Ledger(settings["ledger"]["path"], fmt=settings["ledger"]["format"])
     for _, row in predictions.iterrows():
         ledger.record_prediction(
@@ -128,6 +128,25 @@ def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path
             timestamp=pd.Timestamp.utcnow(),
         )
 
+
+def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path: str | None = None) -> pd.DataFrame:
+    """CLI entry path: download historical data, fit, score a fixture CSV, log to ledger."""
+    settings = load_settings() if settings_path is None else yaml.safe_load(open(settings_path))
+
+    matches = load_historical_matches(leagues, seasons_back, settings)
+    if matches.empty:
+        logger.error("No historical matches available; cannot fit model. Populate data/historical/ or check network access.")
+        return pd.DataFrame()
+
+    model = fit_model(matches, settings)
+
+    fixtures = load_fixture_csv(fixtures_path)
+    if fixtures.empty:
+        logger.warning("No fixtures loaded from %s", fixtures_path)
+        return pd.DataFrame()
+
+    predictions = build_predictions(fixtures, model, settings)
+    record_ledger(predictions, settings)
     return predictions
 
 

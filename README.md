@@ -24,7 +24,7 @@ Run the end-to-end pipeline against a fixture card:
 python -m src.pipeline --fixtures data/fixtures/upcoming.csv --leagues E0,SP1,I1,D1,F1 --seasons-back 2
 ```
 
-Launch the matchday dashboard:
+Launch the web dashboard:
 
 ```bash
 streamlit run app.py
@@ -36,18 +36,43 @@ Run the test suite:
 pytest
 ```
 
+## Web interface
+
+A four-page Streamlit app:
+
+- **Matchday** (`app.py`) — pick a historical data source (offline demo
+  generator, live download, or CSV upload) and a fixture card (demo,
+  sample, or upload), run the pipeline, and see fixtures ranked by EV
+  with xG, model vs. market draw probability, and Kelly stake, qualified
+  bets highlighted.
+- **Model Diagnostics** (`pages/1_Model_Diagnostics.py`) — fitted
+  hyperparameters (μ₀, γ, ρ), convergence/fallback status, and per-team
+  attack/defense ratings with charts.
+- **Backtest** (`pages/2_Backtest.py`) — runs the strict walk-forward
+  engine over the loaded history and reports log-loss, Brier score,
+  flat-stake ROI, max drawdown, and a calibration curve.
+- **Ledger** (`pages/3_Ledger.py`) — full audit trail with filters, and a
+  form to backfill actual results (closing the PnL/CLV loop).
+
+This sandbox has no outbound network access to football-data.co.uk, so
+`src/ingestion/demo_data.py` generates a plausible offline match history
+and fixture card (real team codes, a fitted-model-vs-noisy-market
+dynamic) so the app is fully explorable without a live data source —
+select "Demo data (offline)" / "Demo fixtures (offline)" in the sidebar.
+
 ## Project layout
 
 ```
 config/          Hyperparameters and canonical team-name mappings
 data/            Cached historical results, fixture cards, prediction ledger
-src/ingestion/   Historical results + fixture/odds ingestion, team normalization
+src/ingestion/   Historical/fixture/odds ingestion, team normalization, offline demo data
 src/models/      Dixon-Coles fitting engine and 10x10 scoreline simulator
 src/analytics/   De-vigging (multiplicative / Shin) and EV / Kelly sizing
 src/validation/  Strict walk-forward backtest and evaluation metrics
 src/tracking/    Append-only prediction ledger
-src/pipeline.py  End-to-end CLI entry point
-app.py           Streamlit matchday dashboard
+src/pipeline.py  End-to-end CLI entry point + shared logic for the UI
+app.py           Streamlit dashboard — Matchday (home) page
+pages/           Streamlit dashboard — Model Diagnostics, Backtest, Ledger pages
 ```
 
 ## Guardrails

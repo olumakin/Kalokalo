@@ -25,19 +25,19 @@ FIXTURE_COLUMNS = [
 ]
 
 
-def load_fixture_csv(path: str | Path, mappings: dict | None = None) -> pd.DataFrame:
-    """Load a curated fixture-card CSV with columns:
+def normalize_fixture_dataframe(df: pd.DataFrame, mappings: dict | None = None) -> pd.DataFrame:
+    """Normalize a raw fixture-card DataFrame with columns:
     date, league, home_team, away_team, odds_home, odds_draw, odds_away
 
     home_team/away_team may be raw source names (resolved via
-    team_mappings.json) or already-canonical codes.
+    team_mappings.json) or already-canonical codes. Shared by both the
+    on-disk CSV loader and any in-memory source (a file upload, a demo
+    fixture card) so both paths stay consistent.
     """
-    path = Path(path)
-    if not path.exists():
-        logger.warning("Fixture file not found: %s", path)
+    if df.empty:
         return pd.DataFrame(columns=FIXTURE_COLUMNS)
 
-    df = pd.read_csv(path)
+    df = df.copy()
     mappings = mappings or load_team_mappings()
 
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -45,6 +45,15 @@ def load_fixture_csv(path: str | Path, mappings: dict | None = None) -> pd.DataF
     df["away_team"] = df.apply(lambda r: resolve_team(str(r["away_team"]), r["league"], mappings), axis=1)
 
     return df[FIXTURE_COLUMNS].reset_index(drop=True)
+
+
+def load_fixture_csv(path: str | Path, mappings: dict | None = None) -> pd.DataFrame:
+    """Load a curated fixture-card CSV from disk and normalize it."""
+    path = Path(path)
+    if not path.exists():
+        logger.warning("Fixture file not found: %s", path)
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
+    return normalize_fixture_dataframe(pd.read_csv(path), mappings)
 
 
 def fetch_live_odds(league: str, api_key: str | None = None, base_url: str | None = None) -> pd.DataFrame:
