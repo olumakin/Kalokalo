@@ -15,13 +15,14 @@ import streamlit as st
 
 from src.ingestion.demo_data import generate_demo_fixtures, generate_demo_matches
 from src.ingestion.historical import load_settings
-from src.ingestion.normalizer import normalize_dataframe
+from src.ingestion.normalizer import build_display_names, load_team_mappings, normalize_dataframe
 from src.ingestion.odds_feed import load_fixture_csv, normalize_fixture_dataframe
 from src.pipeline import build_predictions, fit_model, load_historical_matches, record_ledger
 from src.tracking.ledger import Ledger
 
 st.set_page_config(page_title="DVPE — Draw Value Prediction Engine", page_icon="⚽", layout="wide")
 
+MAX_CARDS = 10
 QUALIFIED_BG = "background-color: rgba(34, 197, 94, 0.16)"
 
 
@@ -157,37 +158,76 @@ predictions: pd.DataFrame = st.session_state.get("predictions", pd.DataFrame())
 model = st.session_state.get("model")
 
 # --------------------------------------------------------------------------
-# Results
+# Results — a matchday decision view, not an optimizer debug dump.
 # --------------------------------------------------------------------------
 if predictions.empty:
     st.info("Configure a data source in the sidebar and click **Run pipeline** to score upcoming fixtures.")
 else:
-    qualified = predictions[predictions["qualified"]]
+    qualified = predictions[predictions["qualified"]].sort_values("ev", ascending=False)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Fixtures scored", len(predictions))
-    c2.metric("Qualified +EV draws", len(qualified))
-    c3.metric("Slate exposure", f"{qualified['stake_pct'].sum() * 100:.2f}%")
-    c4.metric("Best EV", f"{predictions['ev'].max() * 100:+.1f}%" if len(predictions) else "—")
-
-    if model is not None:
-        fallback_note = " ⚠️ fallback to independent Poisson (rho=0)" if model.fallback_used_ else ""
-        st.caption(
-            f"Model: μ₀={model.mu0_:.3f}  γ={model.gamma_:.3f}  ρ={model.rho_:.3f}  "
-            f"converged={model.converged_}  teams={len(model.teams_)}{fallback_note}"
+    # Model health is surfaced as a single unobtrusive flag, not raw
+    # optimizer parameters — the full mu0/gamma/rho/converged readout
+    # lives on the Model Diagnostics page.
+    if model is not None and (model.fallback_used_ or not model.converged_):
+        st.warning(
+            "⚠️ Reduced model confidence on this run (optimizer fallback or non-convergence). "
+            "See the **Model Diagnostics** page before acting on these picks."
         )
 
-    st.subheader("Fixtures ranked by EV")
-    display_cols = [
-        "date", "league", "home_team", "away_team", "xg_home", "xg_away",
-        "model_p_draw", "market_p_draw", "odds_draw", "ev", "qualified", "stake_pct",
-    ]
-    styled = predictions[display_cols].style.apply(highlight_qualified, axis=1).format({
-        "xg_home": "{:.2f}", "xg_away": "{:.2f}",
-        "model_p_draw": "{:.1%}", "market_p_draw": "{:.1%}",
-        "odds_draw": "{:.2f}", "ev": "{:+.1%}", "stake_pct": "{:.2%}",
-    })
-    st.dataframe(styled, use_container_width=True, height=min(60 + 35 * len(predictions), 600))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Qualified Plays", f"{len(qualified)} Matches")
+    c2.metric("Total Slate Exposure", f"{qualified['stake_pct'].sum():.1%}")
+    c3.metric("Top Edge", f"+{qualified['ev'].max():.1%}" if not qualified.empty else "—")
+    st.caption(f"Scanned {len(predictions)} fixtures on this slate.")
+
+    st.divider()
+    st.subheader("🎯 Matchday Value Picks")
+
+    top_picks = qualified.head(MAX_CARDS)
+    mappings = load_team_mappings()
+    league_names = {lg: build_display_names(lg, mappings) for lg in predictions["league"].unique()}
+
+    def team_name(code: str, league: str) -> str:
+        return league_names.get(league, {}).get(code, code)
+
+    if top_picks.empty:
+        st.info("No fixtures meet the +3% EV threshold on this slate.")
+    else:
+        for _, row in top_picks.iterrows():
+            with st.container(border=True):
+                c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
+
+                date_str = pd.to_datetime(row["date"]).strftime("%a, %b %d")
+                home, away = team_name(row["home_team"], row["league"]), team_name(row["away_team"], row["league"])
+                c1.markdown(f"**{home} vs {away}**")
+                c1.caption(f"{settings['leagues'].get(row['league'], row['league'])} • {date_str}")
+
+                c2.metric("Draw Odds", f"{row['odds_draw']:.2f}")
+                c3.metric(
+                    "Model vs Market",
+                    f"{row['model_p_draw']:.1%}",
+                    delta=f"+{(row['model_p_draw'] - row['market_p_draw']):.1%}",
+                )
+                c4.metric("Edge (EV)", f"+{row['ev']:.1%}")
+                c5.metric("Stake", f"{row['stake_pct']:.2%}")
+
+                with st.expander("Show tactical metrics"):
+                    st.write(
+                        f"Projected xG: **{home}** ({row['xg_home']:.2f}) — **{away}** ({row['xg_away']:.2f})"
+                    )
+
+    with st.expander(f"Show full fixture list ({len(predictions)} scanned, including non-qualified)"):
+        display_cols = [
+            "date", "league", "home_team", "away_team", "xg_home", "xg_away",
+            "model_p_draw", "market_p_draw", "odds_draw", "ev", "qualified", "stake_pct",
+        ]
+        styled = predictions[display_cols].style.apply(highlight_qualified, axis=1).format({
+            "date": lambda d: pd.to_datetime(d).strftime("%d %b %Y"),
+            "xg_home": "{:.2f}", "xg_away": "{:.2f}",
+            "model_p_draw": "{:.1%}", "market_p_draw": "{:.1%}",
+            "odds_draw": "{:.2f}", "ev": "{:+.1%}", "stake_pct": "{:.2%}",
+        })
+        st.dataframe(styled, use_container_width=True, height=min(60 + 35 * len(predictions), 600))
 
     st.download_button(
         "Download predictions (CSV)",

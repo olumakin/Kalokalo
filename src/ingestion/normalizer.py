@@ -46,6 +46,33 @@ def resolve_team(name: str, league: str, mappings: dict) -> str:
     return fallback
 
 
+def build_display_names(league: str, mappings: dict | None = None) -> dict[str, str]:
+    """Build a code -> human-readable club name lookup for one league.
+
+    Codes are only unique *within* a league (e.g. "MON" is both Monaco in
+    Ligue 1 and Monza in Serie A), so this is intentionally scoped to a
+    single league rather than flattened globally. Picks the longest raw
+    alias mapped to each code as a cheap proxy for "the fuller name"
+    (e.g. "Tottenham" over "Spurs", "Atletico Madrid" over "Ath Madrid")
+    without needing a second hand-maintained display-name file.
+    """
+    mappings = mappings or load_team_mappings()
+    league_map = mappings.get(league, {})
+    display_names: dict[str, str] = {}
+    for raw_name, code in league_map.items():
+        if code not in display_names or len(raw_name) > len(display_names[code]):
+            display_names[code] = raw_name
+    return display_names
+
+
+def resolve_display_name(code: str, league: str, mappings: dict | None = None) -> str:
+    """Best-effort code -> display name for one league; falls back to the
+    code itself if it isn't in team_mappings.json (e.g. an uploaded CSV
+    with codes for an unmapped club)."""
+    mappings = mappings or load_team_mappings()
+    return build_display_names(league, mappings).get(code, code)
+
+
 def normalize_dataframe(raw: pd.DataFrame, mappings: dict | None = None) -> pd.DataFrame:
     """Convert raw football-data.co.uk rows into the canonical schema.
 
