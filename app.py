@@ -18,7 +18,11 @@ import streamlit as st
 from src.ingestion.demo_data import generate_demo_matches
 from src.ingestion.historical import load_settings
 from src.ingestion.normalizer import build_display_names, load_team_mappings, normalize_dataframe
-from src.ingestion.odds_feed import get_upcoming_fixtures
+from src.ingestion.odds_feed import (
+    FIXTURE_SOURCE_FREE_SCHEDULE,
+    FIXTURE_SOURCE_LIVE_ODDS,
+    get_upcoming_fixtures,
+)
 from src.ingestion.sources import (
     BLEND_CONSENSUS,
     BLEND_STRICT,
@@ -69,6 +73,7 @@ CARD_CSS = """
     }
     .badge-tier-2 { background: linear-gradient(135deg, #2563eb, #3b82f6); }
     .badge-tier-3 { background: linear-gradient(135deg, #b45309, #f59e0b); }
+    .badge-below-threshold { background: #334155; color: #94a3b8; box-shadow: none; }
     .payout-box {
         background: rgba(16, 185, 129, 0.08);
         border-left: 3px solid #10b981;
@@ -77,6 +82,13 @@ CARD_CSS = """
         margin-top: 10px;
         font-size: 13px;
         color: #e2e8f0;
+    }
+    /* Sub-threshold "closest misses" cards: visually distinct from a real
+       recommendation — dashed border, no hover glow, dimmed. */
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.miss-card-marker) {
+        border-radius: 14px;
+        border: 1px dashed #334155;
+        opacity: 0.75;
     }
 </style>
 """
@@ -113,7 +125,7 @@ def _cached_blend_sources(
 
 
 @st.cache_data(show_spinner=False)
-def _cached_upcoming_fixtures(leagues: tuple[str, ...], api_key: str) -> pd.DataFrame:
+def _cached_upcoming_fixtures(leagues: tuple[str, ...], api_key: str) -> tuple[pd.DataFrame, str]:
     return get_upcoming_fixtures(list(leagues), api_key=api_key or None)
 
 
@@ -268,24 +280,23 @@ if run_clicked:
             st.stop()
 
     with st.spinner("Fetching upcoming fixtures..."):
-        # Automatic: live consensus odds across every Big 5 league when a
-        # key is available, silently falling back to the bundled sample
-        # fixture card otherwise (get_upcoming_fixtures never raises purely
-        # because the live feed is unreachable). "n_bookmakers" is only
-        # ever present on the live path, so its absence is how the UI
-        # tells the two apart after the fact without changing the return type.
-        fixtures = _cached_upcoming_fixtures(tuple(league_options), odds_api_key)
-        used_live_odds = "n_bookmakers" in fixtures.columns
+        # Automatic three-tier chain, no source to pick: live consensus
+        # odds (needs a key) -> free football-data.co.uk weekly schedule
+        # (no key) -> bundled sample fixture card (always available).
+        # get_upcoming_fixtures never raises purely because a remote tier
+        # is unreachable — every run in this sandbox hits the final tier,
+        # since there's no outbound network access here at all.
+        fixtures, fixture_source_used = _cached_upcoming_fixtures(tuple(league_options), odds_api_key)
 
     if fixtures.empty:
-        st.error("No fixtures available — live feed and the bundled fixture card both returned nothing.")
+        st.error("No fixtures available — live feed, free schedule, and the bundled fixture card all returned nothing.")
         st.stop()
 
     predictions = build_predictions(fixtures, model, settings)
     if record_to_ledger:
         record_ledger(predictions, settings)
 
-    st.session_state["used_live_odds"] = used_live_odds
+    st.session_state["fixture_source_used"] = fixture_source_used
     st.session_state["model"] = model
     st.session_state["matches"] = matches
     st.session_state["predictions"] = predictions
@@ -328,10 +339,13 @@ else:
     c2.metric("Total Suggested Stake", f"{qualified['stake_pct'].sum():.1%}")
     c3.metric("Top Value", f"+{qualified['ev'].max():.1%}" if not qualified.empty else "—")
 
-    feed_note = (
-        "✓ Live consensus odds from The Odds API"
-        if st.session_state.get("used_live_odds")
-        else "ℹ️ Live feed unavailable — showing the bundled sample fixture card"
+    _feed_notes = {
+        FIXTURE_SOURCE_LIVE_ODDS: "✓ Live consensus odds from The Odds API",
+        FIXTURE_SOURCE_FREE_SCHEDULE: "✓ Free weekly schedule from football-data.co.uk",
+    }
+    feed_note = _feed_notes.get(
+        st.session_state.get("fixture_source_used"),
+        "ℹ️ Live and free feeds unavailable — showing the bundled sample fixture card",
     )
     st.caption(f"Scanned {len(predictions)} fixtures on this slate · {feed_note}")
 
@@ -364,7 +378,41 @@ else:
         top_picks = qualified.sort_values("ev", ascending=False).head(max_cards)
 
     if top_picks.empty:
-        st.info("No standout draw value opportunities on this slate.")
+        st.info(
+            "ℹ️ No fixtures met the +3% EV threshold on this slate. Showing the closest misses "
+            "for context — these fall below the bar and carry **no recommended stake**."
+        )
+        closest = predictions.sort_values("ev", ascending=False).head(max_cards)
+        rows = list(closest.iterrows())
+        for i in range(0, len(rows), 2):
+            pair = rows[i:i + 2]
+            cols = st.columns(2)
+            for col, (_, row) in zip(cols, pair):
+                with col, st.container(border=True):
+                    st.markdown('<div class="miss-card-marker"></div>', unsafe_allow_html=True)
+
+                    date_str = pd.to_datetime(row["date"]).strftime("%a, %b %d")
+                    league_full = settings["leagues"].get(row["league"], row["league"])
+                    st.markdown(
+                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
+                        f"<span style='color:#8b949e; font-size:13px;'>{league_full} • {date_str}</span>"
+                        f"<span class='value-badge badge-below-threshold'>BELOW THRESHOLD</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    home = team_name(row["home_team"], row["league"])
+                    away = team_name(row["away_team"], row["league"])
+                    st.markdown(
+                        f"<h3 style='margin:0 0 12px 0; font-size:1.25rem; color:#94a3b8;'>{home} "
+                        f"<span style='color:#64748b;'>vs</span> {away}</h3>",
+                        unsafe_allow_html=True,
+                    )
+
+                    m1, m2 = st.columns(2)
+                    m1.metric("Odds Multiplier", f"{row['odds_draw']:.2f}x")
+                    m2.metric("Model Edge", f"{row['ev']:+.1%}")
+                    st.caption("No stake recommended — doesn't clear the +3% EV bar.")
     else:
         rows = list(top_picks.iterrows())
         for i in range(0, len(rows), 2):

@@ -44,9 +44,14 @@ A four-page Streamlit app:
   generator, or football-data.co.uk + Understat to blend, or a CSV
   upload), run the pipeline, and see fixtures ranked by EV with xG,
   model vs. market draw probability, and Kelly stake, qualified bets
-  highlighted. Upcoming fixtures are fetched automatically — live
-  consensus odds from The Odds API if a key is set, otherwise a bundled
-  sample fixture card, with no source to pick.
+  highlighted. Upcoming fixtures are fetched automatically through a
+  three-tier chain, with no source to pick: live consensus odds from
+  The Odds API if a key is set, then the free weekly football-data.co.uk
+  fixture sheet (no key needed), then a bundled sample fixture card as a
+  last resort. If nothing on the slate clears the +3% EV bar, the
+  closest misses are still shown — visually distinct (dashed border,
+  "BELOW THRESHOLD" badge, no stake/payout box) so they read as context,
+  never as a recommendation.
 - **Model Diagnostics** (`pages/1_Model_Diagnostics.py`) — fitted
   hyperparameters (μ₀, γ, ρ), convergence/fallback status, and per-team
   attack/defense ratings with charts.
@@ -61,10 +66,15 @@ This sandbox has no outbound network access to football-data.co.uk, so
 (real team codes, a fitted-model-vs-noisy-market dynamic) so the app is
 fully explorable without a live data source — "Use offline demo data"
 is checked by default in the sidebar. Fixtures always come from
-`get_upcoming_fixtures` (`src/ingestion/odds_feed.py`): it always tries
-live odds first if a key is present, and transparently falls back to
-`data/fixtures/upcoming.csv` — which is exactly what happens on every
-run in this sandbox, since the live feed is unreachable here.
+`get_upcoming_fixtures` (`src/ingestion/odds_feed.py`), trying live odds,
+then the free schedule, then `data/fixtures/upcoming.csv` in order — every
+run in this sandbox hits that last tier, since none of the remote sources
+are reachable here. Because the sample card's real Big 5 teams (Arsenal,
+Real Madrid, Juventus, ...) mostly don't overlap the demo history's
+randomly-sampled team pool, the out-of-the-box run in this sandbox
+usually lands on the below-threshold "closest misses" view rather than a
+qualified pick — showing that is the point (a working example of the
+tool declining to recommend a stake), not a bug.
 
 ## Multi-source data blending
 
@@ -89,10 +99,18 @@ chances. The Matchday sidebar's "Blend online sources" option
   upcoming odds only. `get_upcoming_fixtures` calls it automatically for
   every Big 5 league and averages the 1X2 price across every bookmaker
   in the response for a genuine multi-book consensus (not just whichever
-  book comes first), falling back to the sample fixture card if it
-  returns nothing. Needs an API key — the sidebar only asks for one if
+  book comes first). Needs an API key — the sidebar only asks for one if
   `ODDS_API_KEY` isn't already set in the environment or
   `.streamlit/secrets.toml`.
+- **football-data.co.uk free fixture sheet**
+  (`src/ingestion/odds_feed.py:fetch_free_schedule`) — a second
+  fixture-side fallback, no key needed: `fixtures.csv` on the same site
+  as the historical results, refreshed roughly weekly (Fridays) with
+  Bet365 pre-match odds for the coming weekend's Big 5 matches. A row
+  missing any of the three 1X2 prices is dropped rather than filled
+  with a placeholder — a fabricated price would make the EV computed
+  against it meaningless on a tool whose job is finding real
+  mispricings, not just approximately wrong in a way that looks fine.
 
 **Not implemented** (real extension points, not fake stubs): **Betfair
 Exchange** — its API-NG requires certificate-based login and a

@@ -8,6 +8,7 @@ absence never breaks the pipeline.
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
 from pathlib import Path
@@ -142,37 +143,111 @@ def fetch_live_odds(
     return pd.DataFrame(rows, columns=FIXTURE_COLUMNS + ["n_bookmakers"])
 
 
+FREE_FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
+
+
+def fetch_free_schedule(
+    leagues: list[str], url: str | None = None, session: requests.Session | None = None,
+    mappings: dict | None = None,
+) -> pd.DataFrame:
+    """Free, no-auth upcoming-fixture sheet from football-data.co.uk —
+    the same provider as the historical results CSVs, refreshed roughly
+    weekly (Fridays) with the coming weekend's Big 5 matches and Bet365
+    pre-match 1X2 odds. No API key, but no live-market movement either
+    (The Odds API is the live-consensus path; this is a static schedule).
+
+    A row missing any of the three 1X2 prices is dropped, not filled
+    with a placeholder odds value — a fabricated price would make the
+    EV computed against it meaningless, not just approximate, on a tool
+    whose entire purpose is finding real mispricings.
+
+    Returns an empty frame (logged warning) on any network, schema, or
+    parsing failure, matching the rest of src/ingestion.
+    """
+    url = url or FREE_FIXTURES_URL
+    empty = pd.DataFrame(columns=FIXTURE_COLUMNS)
+    try:
+        sess = session or requests
+        resp = sess.get(url, timeout=20)
+        resp.raise_for_status()
+        # football-data.co.uk CSVs are Latin-1 (team names with accents);
+        # decode from raw bytes rather than trust response.text's guess.
+        raw = pd.read_csv(io.BytesIO(resp.content), encoding="latin1")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not fetch free fixture schedule: %s", exc)
+        return empty
+
+    required = {"Div", "Date", "HomeTeam", "AwayTeam", "B365H", "B365D", "B365A"}
+    if not required.issubset(raw.columns):
+        logger.warning("Unexpected schema from free fixture schedule (missing columns)")
+        return empty
+
+    raw = raw[raw["Div"].isin(leagues)]
+    if raw.empty:
+        return empty
+
+    complete = raw.dropna(subset=["B365H", "B365D", "B365A"])
+    dropped = len(raw) - len(complete)
+    if dropped:
+        logger.info("Dropped %d fixture(s) missing a full 1X2 price from the free schedule", dropped)
+
+    df = pd.DataFrame({
+        "date": pd.to_datetime(complete["Date"], dayfirst=True, errors="coerce"),
+        "league": complete["Div"],
+        "home_team": complete["HomeTeam"],
+        "away_team": complete["AwayTeam"],
+        "odds_home": complete["B365H"].astype(float),
+        "odds_draw": complete["B365D"].astype(float),
+        "odds_away": complete["B365A"].astype(float),
+    }).dropna(subset=["date"])
+
+    return normalize_fixture_dataframe(df, mappings)
+
+
+# Explicit labels for which tier of the fallback chain actually supplied
+# a given get_upcoming_fixtures() result — the caller decides how (or
+# whether) to surface this, per this module's usual UI-framework-agnostic
+# design; it's simpler and more honest than inferring it from incidental
+# column differences between sources.
+FIXTURE_SOURCE_LIVE_ODDS = "live_odds"
+FIXTURE_SOURCE_FREE_SCHEDULE = "free_schedule"
+FIXTURE_SOURCE_SAMPLE_CARD = "sample_card"
+
+
 def get_upcoming_fixtures(
     leagues: list[str],
     api_key: str | None = None,
     fallback_path: str | Path = "data/fixtures/upcoming.csv",
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str]:
     """Automatically fetch upcoming fixtures across `leagues` with no
-    caller-side mode selection: live 1X2 consensus odds from The Odds
-    API when a key is available, silently falling back to the curated
-    fixture card at `fallback_path` if the live feed returns nothing at
-    all (no key, every league unreachable, or a quiet API outage) —
-    same never-raise-on-an-unavailable-source pattern as the rest of
-    src/ingestion.
+    caller-side mode selection, trying three tiers in order and using
+    the first that returns anything:
 
-    Deliberately does not raise or emit UI warnings itself — this stays
-    UI-framework-agnostic like every other src/ingestion function (only
-    `logging`, no `streamlit`), so it can be unit-tested without a
-    Streamlit runtime. The caller (app.py) decides how to surface
-    "using cached fixtures" to the user.
+      1. Live consensus odds from The Odds API, if `api_key` is set.
+      2. The free football-data.co.uk weekly fixture sheet (no key).
+      3. The bundled sample fixture card at `fallback_path` — a final,
+         always-available safety net (e.g. this sandbox has no outbound
+         network access at all, so every run here hits this tier).
+
+    Returns (fixtures, source_label) where source_label is one of the
+    FIXTURE_SOURCE_* constants above. Never raises purely because a
+    remote source is unavailable — same pattern as the rest of
+    src/ingestion — and stays UI-framework-agnostic (only `logging`, no
+    `streamlit`) so it's unit-testable without a Streamlit runtime; the
+    caller (app.py) decides how to surface the source to the user.
     """
-    frames = []
     if api_key:
-        for league in leagues:
-            df = fetch_live_odds(league, api_key=api_key)
-            if not df.empty:
-                frames.append(df)
+        frames = [fetch_live_odds(league, api_key=api_key) for league in leagues]
+        frames = [f for f in frames if not f.empty]
+        if frames:
+            combined = pd.concat(frames, ignore_index=True)
+            # fetch_live_odds returns The Odds API's own raw team-name
+            # strings (e.g. "Manchester City"), not our canonical codes.
+            return normalize_fixture_dataframe(combined), FIXTURE_SOURCE_LIVE_ODDS
 
-    if frames:
-        combined = pd.concat(frames, ignore_index=True)
-        # fetch_live_odds returns The Odds API's own raw team-name strings
-        # (e.g. "Manchester City"), not our canonical codes.
-        return normalize_fixture_dataframe(combined)
+    free = fetch_free_schedule(leagues)
+    if not free.empty:
+        return free, FIXTURE_SOURCE_FREE_SCHEDULE
 
-    logger.info("No live odds available for %s; falling back to %s", leagues, fallback_path)
-    return load_fixture_csv(fallback_path)
+    logger.info("No live or free fixture data available for %s; falling back to %s", leagues, fallback_path)
+    return load_fixture_csv(fallback_path), FIXTURE_SOURCE_SAMPLE_CARD
