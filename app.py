@@ -16,7 +16,15 @@ import streamlit as st
 from src.ingestion.demo_data import generate_demo_fixtures, generate_demo_matches
 from src.ingestion.historical import load_settings
 from src.ingestion.normalizer import build_display_names, load_team_mappings, normalize_dataframe
-from src.ingestion.odds_feed import load_fixture_csv, normalize_fixture_dataframe
+from src.ingestion.odds_feed import fetch_live_odds, load_fixture_csv, normalize_fixture_dataframe
+from src.ingestion.sources import (
+    ALL_SOURCES,
+    BLEND_CONSENSUS,
+    BLEND_STRICT,
+    DEFAULT_SOURCES,
+    SOURCE_UNDERSTAT,
+    load_and_blend_sources,
+)
 from src.pipeline import build_predictions, fit_model, load_historical_matches, record_ledger
 from src.tracking.ledger import Ledger
 
@@ -101,6 +109,27 @@ def _cached_historical_download(leagues: tuple[str, ...], seasons_back: int, _se
     return load_historical_matches(list(leagues), seasons_back, _settings)
 
 
+@st.cache_data(show_spinner=False)
+def _cached_blend_sources(
+    selected_sources: tuple[str, ...], leagues: tuple[str, ...], seasons_back: int, _settings: dict, blend_mode: str,
+) -> pd.DataFrame:
+    return load_and_blend_sources(list(selected_sources), list(leagues), seasons_back, _settings, blend_mode=blend_mode)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_live_odds(leagues: tuple[str, ...], api_key: str) -> pd.DataFrame:
+    frames = [fetch_live_odds(lg, api_key=api_key or None) for lg in leagues]
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=["date", "league", "home_team", "away_team", "odds_home", "odds_draw", "odds_away"])
+    combined = pd.concat(frames, ignore_index=True)
+    # fetch_live_odds returns The Odds API's own raw team-name strings
+    # (e.g. "Manchester City"), not our canonical codes — resolve them
+    # the same way any other fixture source is resolved, or the model
+    # would treat every live fixture as an unseen (league-median) team.
+    return normalize_fixture_dataframe(combined)
+
+
 settings = load_settings()
 league_options = list(settings["leagues"].keys())
 
@@ -110,9 +139,9 @@ st.markdown(CARD_CSS, unsafe_allow_html=True)
 # Sidebar: data sources + run controls
 # --------------------------------------------------------------------------
 with st.sidebar:
-    st.header("1. Historical data")
+    st.header("1. Historical & Market Data Sources")
     history_source = st.radio(
-        "Source", ["Demo data (offline)", "Download (football-data.co.uk)", "Upload CSV"],
+        "Source", ["Demo data (offline)", "Blend online sources", "Upload CSV"],
         help="This sandbox has no outbound network access, so Demo data is the reliable default.",
     )
 
@@ -121,12 +150,33 @@ with st.sidebar:
         demo_n_teams = st.slider("Teams", 6, 20, 10)
         demo_rounds = st.slider("Round-robins", 2, 8, 4, help="Each round-robin is a full home-and-away cycle.")
         demo_seed = st.number_input("Random seed", value=42, step=1)
-    elif history_source == "Download (football-data.co.uk)":
+    elif history_source == "Blend online sources":
         dl_leagues = st.multiselect(
             "Leagues", league_options, default=league_options,
             format_func=lambda c: f"{c} — {settings['leagues'][c]}",
         )
         dl_seasons_back = st.slider("Seasons of history", 1, 4, 2)
+        selected_sources = st.multiselect(
+            "Select sources to blend & cross-analyze",
+            options=ALL_SOURCES, default=DEFAULT_SOURCES,
+            help="football-data.co.uk supplies results/goals and is always included as the base. "
+                 "Understat adds match-level xG as a lower-variance signal alongside it.",
+        )
+        blend_mode = st.radio(
+            "Data Combination Strategy", [BLEND_CONSENSUS, BLEND_STRICT], index=0,
+            help="Consensus keeps every base match (gaps where a source has no data). "
+                 "Strict keeps only matches every selected source covers.",
+        )
+        fit_on_xg = False
+        if SOURCE_UNDERSTAT in selected_sources:
+            fit_on_xg = st.checkbox(
+                "Fit Dixon-Coles on blended xG instead of raw goals scored",
+                value=False,
+                help="Uses Understat's shot-based xG as the Poisson target instead of final-score "
+                     "goals — a lower-variance proxy for attacking/defensive quality. Approximate: "
+                     "xG isn't literally Poisson count data (see DixonColesModel.fit docstring). "
+                     "Off by default — the PID's model is defined on actual goals.",
+            )
     else:
         uploaded_history = st.file_uploader(
             "Historical results CSV", type="csv",
@@ -135,13 +185,23 @@ with st.sidebar:
 
     st.header("2. Upcoming fixtures")
     fixture_source = st.radio(
-        "Source", ["Demo fixtures (offline)", "Sample fixture card", "Upload CSV"],
+        "Source", ["Demo fixtures (offline)", "Sample fixture card", "The Odds API (live consensus)", "Upload CSV"],
     )
     if fixture_source == "Demo fixtures (offline)":
         demo_n_fixtures = st.slider("Number of fixtures", 4, 30, 12)
         demo_fixture_seed = st.number_input("Fixture random seed", value=3, step=1)
     elif fixture_source == "Sample fixture card":
         fixtures_path = st.text_input("Fixture CSV path", value="data/fixtures/upcoming.csv")
+    elif fixture_source == "The Odds API (live consensus)":
+        odds_api_leagues = st.multiselect(
+            "Leagues", league_options, default=league_options,
+            format_func=lambda c: f"{c} — {settings['leagues'][c]}",
+        )
+        odds_api_key = st.text_input(
+            "Odds API key", type="password",
+            help="Falls back to the ODDS_API_KEY environment variable if left blank. "
+                 "Free tier: 500 requests/month, live odds only (no historical endpoint).",
+        )
     else:
         uploaded_fixtures = st.file_uploader(
             "Fixture CSV", type="csv",
@@ -159,8 +219,13 @@ if run_clicked:
     with st.spinner("Loading historical data..."):
         if history_source == "Demo data (offline)":
             matches = _cached_demo_matches(demo_league, demo_n_teams, demo_rounds, int(demo_seed))
-        elif history_source == "Download (football-data.co.uk)":
-            matches = _cached_historical_download(tuple(dl_leagues), dl_seasons_back, settings)
+        elif history_source == "Blend online sources":
+            if not dl_leagues:
+                st.error("Select at least one league to blend.")
+                st.stop()
+            matches = _cached_blend_sources(
+                tuple(selected_sources), tuple(dl_leagues), dl_seasons_back, settings, blend_mode,
+            )
         else:
             if uploaded_history is None:
                 st.error("Upload a historical results CSV, or switch data source.")
@@ -174,8 +239,11 @@ if run_clicked:
         st.stop()
 
     with st.spinner("Fitting Dixon-Coles model..."):
+        goal_cols = ("home_xg", "away_xg") if (history_source == "Blend online sources" and fit_on_xg) else (
+            "home_goals", "away_goals"
+        )
         try:
-            model = fit_model(matches, settings)
+            model = fit_model(matches, settings, goal_columns=goal_cols)
         except ValueError as exc:
             st.error(f"Model fit failed: {exc}")
             st.stop()
@@ -190,6 +258,17 @@ if run_clicked:
             )
         elif fixture_source == "Sample fixture card":
             fixtures = load_fixture_csv(fixtures_path)
+        elif fixture_source == "The Odds API (live consensus)":
+            if not odds_api_leagues:
+                st.error("Select at least one league for live odds.")
+                st.stop()
+            fixtures = _cached_live_odds(tuple(odds_api_leagues), odds_api_key)
+            if fixtures.empty:
+                st.error(
+                    "No live odds returned — check the API key (or ODDS_API_KEY env var) and that "
+                    "there are upcoming fixtures in the selected leagues."
+                )
+                st.stop()
         else:
             if uploaded_fixtures is None:
                 st.error("Upload a fixture CSV, or switch fixture source.")

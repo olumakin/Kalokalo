@@ -116,3 +116,39 @@ class TestDixonColesFit:
         assert "RARE" in model.regularized_teams_
         assert model.alpha_["RARE"] == pytest.approx(0.0)
         assert model.beta_["RARE"] == pytest.approx(0.0)
+
+    def test_fit_on_alternate_goal_columns(self):
+        """goal_columns lets the optimizer fit on e.g. blended xG instead
+        of raw goals (src/ingestion/sources.py), without touching the
+        default (home_goals/away_goals) behavior."""
+        matches = generate_synthetic_matches()
+        rng = np.random.default_rng(7)
+        # A noisy-but-correlated xG proxy for the actual goals scored.
+        matches["home_xg"] = (matches["home_goals"] + rng.normal(0, 0.3, len(matches))).clip(lower=0)
+        matches["away_xg"] = (matches["away_goals"] + rng.normal(0, 0.3, len(matches))).clip(lower=0)
+
+        model = DixonColesModel(min_matches=15).fit(
+            matches, xi=0.0065, goal_columns=("home_xg", "away_xg"),
+        )
+
+        assert model.converged_ is True
+        lam, mu, rho = model.predict("T00", "T01")
+        assert lam > 0 and mu > 0
+
+    def test_fit_rejects_missing_goal_columns(self):
+        matches = generate_synthetic_matches()
+        with pytest.raises(ValueError):
+            DixonColesModel(min_matches=15).fit(matches, goal_columns=("home_xg", "away_xg"))
+
+    def test_fit_drops_rows_with_null_goal_column(self):
+        matches = generate_synthetic_matches()
+        matches["home_xg"] = matches["home_goals"].astype(float)
+        matches["away_xg"] = matches["away_goals"].astype(float)
+        # Blank out xG for a chunk of rows, as a left-joined blend would
+        # for matches a supplemental source doesn't cover.
+        matches.loc[matches.index[:50], ["home_xg", "away_xg"]] = np.nan
+
+        model = DixonColesModel(min_matches=15).fit(
+            matches, xi=0.0065, goal_columns=("home_xg", "away_xg"),
+        )
+        assert model.converged_ is True

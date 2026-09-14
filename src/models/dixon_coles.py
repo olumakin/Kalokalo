@@ -111,16 +111,31 @@ class DixonColesModel:
     # -- public API ---------------------------------------------------------
 
     def fit(self, matches: pd.DataFrame, as_of: pd.Timestamp | None = None,
-            xi: float = 0.0065) -> "DixonColesModel":
+            xi: float = 0.0065, goal_columns: tuple[str, str] = ("home_goals", "away_goals")) -> "DixonColesModel":
         """Fit the model on matches strictly before `as_of` (or all rows if
         `as_of` is None). `matches` must already be in canonical schema
         (see src.ingestion.normalizer) with a `date` column of Timestamps.
+
+        `goal_columns` defaults to the actual final-score columns. Pass
+        e.g. `("home_xg", "away_xg")` to fit on blended Expected Goals
+        (src/ingestion/sources.py) instead of raw goals scored — a lower-
+        variance proxy for attacking/defensive quality. This relies on
+        the Poisson log-likelihood's gamma-function generalization of x!
+        to non-integer x, a documented but approximate technique (xG
+        isn't literally Poisson-distributed count data); it is not the
+        PID's default and must be opted into explicitly.
         """
+        goal_col_h, goal_col_a = goal_columns
         df = matches.copy()
         if as_of is not None:
             df = df[df["date"] < as_of]
         if df.empty:
             raise ValueError("No matches available to fit on")
+        if goal_col_h not in df.columns or goal_col_a not in df.columns:
+            raise ValueError(f"goal_columns {goal_columns} not present in matches")
+        df = df.dropna(subset=[goal_col_h, goal_col_a])
+        if df.empty:
+            raise ValueError(f"No matches with non-null {goal_columns} to fit on")
 
         cutoff = as_of if as_of is not None else (df["date"].max() + pd.Timedelta(days=1))
         delta_days = (cutoff - df["date"]).dt.days.clip(lower=0).to_numpy(dtype=float)
@@ -143,8 +158,8 @@ class DixonColesModel:
 
         home_idx = df["home_team"].map(lambda t: team_index.get(t, -1)).to_numpy()
         away_idx = df["away_team"].map(lambda t: team_index.get(t, -1)).to_numpy()
-        hg = df["home_goals"].to_numpy(dtype=float)
-        ag = df["away_goals"].to_numpy(dtype=float)
+        hg = df[goal_col_h].to_numpy(dtype=float)
+        ag = df[goal_col_a].to_numpy(dtype=float)
         log_fact_h = gammaln(hg + 1)
         log_fact_a = gammaln(ag + 1)
 

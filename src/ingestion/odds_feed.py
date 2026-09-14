@@ -56,22 +56,48 @@ def load_fixture_csv(path: str | Path, mappings: dict | None = None) -> pd.DataF
     return normalize_fixture_dataframe(pd.read_csv(path), mappings)
 
 
-def fetch_live_odds(league: str, api_key: str | None = None, base_url: str | None = None) -> pd.DataFrame:
-    """Fetch upcoming fixture odds from a live provider.
+# The Odds API's own sport keys — not our internal league codes.
+ODDS_API_SPORT_KEYS = {
+    "E0": "soccer_epl",
+    "SP1": "soccer_spain_la_liga",
+    "I1": "soccer_italy_serie_a",
+    "D1": "soccer_germany_bundesliga1",
+    "F1": "soccer_france_ligue_one",
+}
+
+
+def fetch_live_odds(
+    league: str, api_key: str | None = None, base_url: str | None = None,
+    session: requests.Session | None = None,
+) -> pd.DataFrame:
+    """Fetch live upcoming-fixture 1X2 odds from The Odds API, averaged
+    across every bookmaker the response includes — a genuine multi-book
+    consensus price, not just whichever bookmaker happens to be first in
+    the payload.
 
     Requires ODDS_API_KEY (or an explicit api_key). Any failure — missing
-    key, network error, unexpected schema — logs a warning and returns an
-    empty frame so callers can fall back to the local fixture CSV.
+    key, unmapped league, network error, unexpected schema — logs a
+    warning and returns an empty frame so callers can fall back to a
+    local fixture CSV. The Odds API's free tier serves live/upcoming
+    odds only; it has no historical-odds endpoint, so this is a fixture-
+    side source, not a historical one (see src/ingestion/sources.py for
+    historical blending).
     """
     api_key = api_key or os.environ.get("ODDS_API_KEY")
     if not api_key:
         logger.warning("ODDS_API_KEY not set; skipping live odds fetch for %s", league)
         return pd.DataFrame(columns=FIXTURE_COLUMNS)
 
-    base_url = base_url or "https://api.the-odds-api.com/v4/sports/{league}/odds"
+    sport_key = ODDS_API_SPORT_KEYS.get(league)
+    if sport_key is None:
+        logger.warning("No Odds API sport key mapped for league %r", league)
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
+
+    base_url = base_url or "https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     try:
-        resp = requests.get(
-            base_url.format(league=league),
+        sess = session or requests
+        resp = sess.get(
+            base_url.format(sport_key=sport_key),
             params={"apiKey": api_key, "regions": "eu", "markets": "h2h"},
             timeout=20,
         )
@@ -83,19 +109,34 @@ def fetch_live_odds(league: str, api_key: str | None = None, base_url: str | Non
 
     rows = []
     for event in payload:
-        try:
-            outcomes = event["bookmakers"][0]["markets"][0]["outcomes"]
-            price_by_name = {o["name"]: o["price"] for o in outcomes}
-            rows.append({
-                "date": event.get("commence_time"),
-                "league": league,
-                "home_team": event.get("home_team"),
-                "away_team": event.get("away_team"),
-                "odds_home": price_by_name.get(event.get("home_team")),
-                "odds_draw": price_by_name.get("Draw"),
-                "odds_away": price_by_name.get(event.get("away_team")),
-            })
-        except (KeyError, IndexError):
-            continue
+        home_team = event.get("home_team")
+        away_team = event.get("away_team")
+        home_prices, draw_prices, away_prices = [], [], []
 
-    return pd.DataFrame(rows, columns=FIXTURE_COLUMNS)
+        for bookmaker in event.get("bookmakers", []):
+            market = next((m for m in bookmaker.get("markets", []) if m.get("key") == "h2h"), None)
+            if market is None:
+                continue
+            price_by_name = {o["name"]: o["price"] for o in market.get("outcomes", [])}
+            if home_team in price_by_name:
+                home_prices.append(price_by_name[home_team])
+            if "Draw" in price_by_name:
+                draw_prices.append(price_by_name["Draw"])
+            if away_team in price_by_name:
+                away_prices.append(price_by_name[away_team])
+
+        if not (home_prices and draw_prices and away_prices):
+            continue  # no bookmaker quoted a full 1X2 market for this event
+
+        rows.append({
+            "date": event.get("commence_time"),
+            "league": league,
+            "home_team": home_team,
+            "away_team": away_team,
+            "odds_home": sum(home_prices) / len(home_prices),
+            "odds_draw": sum(draw_prices) / len(draw_prices),
+            "odds_away": sum(away_prices) / len(away_prices),
+            "n_bookmakers": len(event.get("bookmakers", [])),
+        })
+
+    return pd.DataFrame(rows, columns=FIXTURE_COLUMNS + ["n_bookmakers"])

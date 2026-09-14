@@ -94,15 +94,22 @@ def load_historical_matches(leagues: list[str], seasons_back: int, settings: dic
     return normalize_dataframe(raw)
 
 
-def fit_model(matches: pd.DataFrame, settings: dict) -> DixonColesModel:
-    """Fit the Dixon-Coles model on a canonical-schema match history."""
+def fit_model(
+    matches: pd.DataFrame, settings: dict, goal_columns: tuple[str, str] = ("home_goals", "away_goals"),
+) -> DixonColesModel:
+    """Fit the Dixon-Coles model on a canonical-schema match history.
+
+    `goal_columns` defaults to actual goals; pass ("home_xg", "away_xg")
+    to fit on blended xG instead (src/ingestion/sources.py) — see
+    DixonColesModel.fit's docstring for the caveats of doing so.
+    """
     model_cfg = settings["model"]
     model = DixonColesModel(
         min_matches=model_cfg["min_matches_for_team_rating"],
         max_iter=model_cfg["max_optimizer_iterations"],
         method=model_cfg["optimizer_method"],
         rho_init=model_cfg["rho_init"],
-    ).fit(matches, xi=model_cfg["xi_decay"])
+    ).fit(matches, xi=model_cfg["xi_decay"], goal_columns=goal_columns)
     logger.info(
         "Model fit: mu0=%.4f gamma=%.4f rho=%.4f converged=%s fallback_used=%s teams=%d",
         model.mu0_, model.gamma_, model.rho_, model.converged_, model.fallback_used_, len(model.teams_),

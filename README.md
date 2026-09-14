@@ -60,12 +60,48 @@ and fixture card (real team codes, a fitted-model-vs-noisy-market
 dynamic) so the app is fully explorable without a live data source —
 select "Demo data (offline)" / "Demo fixtures (offline)" in the sidebar.
 
+## Multi-source data blending
+
+football-data.co.uk alone gives goals and closing odds but no
+shot-quality signal — a 1-0 can easily have been a 2-2 on underlying
+chances. The Matchday sidebar's "Blend online sources" option
+(`src/ingestion/sources.py`) can merge it with:
+
+- **Understat** (`src/ingestion/understat_xg.py`) — match-level xG,
+  scraped from an embedded JSON blob on Understat's league pages (no
+  public API exists). Merged onto the base results by (date, league,
+  home_team, away_team), in either mode:
+  - *Blended Consensus* (default) — keep every base match; xG is null
+    where Understat has no coverage.
+  - *Strict Intersection* — keep only matches both sources cover.
+  - Optionally, fit Dixon-Coles directly on xG instead of raw goals
+    (`DixonColesModel.fit(goal_columns=("home_xg", "away_xg"))`) — a
+    lower-variance target, at the cost of xG not being literally
+    Poisson count data (see that method's docstring).
+- **The Odds API** (`src/ingestion/odds_feed.py:fetch_live_odds`) — a
+  *fixture-side* source, not historical: its free tier serves live
+  upcoming odds only. Selecting it under "Upcoming fixtures" averages
+  the 1X2 price across every bookmaker in the response for a genuine
+  multi-book consensus, rather than taking whichever book comes first.
+  Needs an API key (field in the sidebar, or `ODDS_API_KEY` env var).
+
+**Not implemented** (real extension points, not fake stubs): **Betfair
+Exchange** — its API-NG requires certificate-based login and a
+registered application key this project has no credentials for; and
+**FBref** — another xG source, left out to avoid doubling scraper-
+maintenance surface for limited incremental benefit over Understat
+alone. Both scrapers (Understat included) depend on site markup that
+can change without notice — failures degrade to an empty result with a
+logged warning rather than breaking the pipeline, but nothing here was
+verified against a live pull (this sandbox has no outbound access).
+
 ## Project layout
 
 ```
 config/          Hyperparameters and canonical team-name mappings
 data/            Cached historical results, fixture cards, prediction ledger
-src/ingestion/   Historical/fixture/odds ingestion, team normalization, offline demo data
+src/ingestion/   Historical/fixture/odds ingestion, team normalization, offline demo data,
+                 Understat xG scraper, multi-source blending
 src/models/      Dixon-Coles fitting engine and 10x10 scoreline simulator
 src/analytics/   De-vigging (multiplicative / Shin) and EV / Kelly sizing
 src/validation/  Strict walk-forward backtest and evaluation metrics
@@ -123,8 +159,11 @@ Phases 1-5 of the PID are implemented as a working MVP:
 - [x] De-vig (multiplicative + Shin) and Fractional Kelly sizing with risk caps
 - [x] Persistent prediction ledger + Streamlit matchday dashboard
 
-Not yet wired: a live odds-provider integration (`src/ingestion/odds_feed.py`
-has the interface; MVP source is the curated `data/fixtures/` CSV) and the
-`xi` decay grid search itself, which is exposed as a config surface
-(`model.xi_grid` in `config/settings.yaml`) for the validation harness to
-sweep.
+Also implemented: multi-source historical blending (football-data.co.uk +
+Understat xG) and a live odds-provider integration (The Odds API,
+multi-bookmaker consensus) — see "Multi-source data blending" above.
+
+Not yet wired: the `xi` decay grid search itself, which is exposed as a
+config surface (`model.xi_grid` in `config/settings.yaml`) for the
+validation harness to sweep; and Betfair Exchange / FBref as additional
+sources (see caveats above).
