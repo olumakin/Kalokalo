@@ -25,9 +25,48 @@ st.set_page_config(page_title="DVPE — Draw Value Prediction Engine", page_icon
 MAX_CARDS = 10
 QUALIFIED_BG = "background-color: rgba(34, 197, 94, 0.16)"
 
+# Value-rating tiers for qualified plays, relative to the 3% EV qualification
+# floor (config/settings.yaml: edge.min_ev) — not absolute magic numbers.
+EXCEPTIONAL_EV = 0.15
+HIGH_EV = 0.08
+
+CARD_CSS = """
+<style>
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.match-card-marker) {
+        border-radius: 12px;
+        transition: transform 0.15s ease, border-color 0.15s ease;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.match-card-marker):hover {
+        border-color: #58a6ff;
+        transform: translateY(-2px);
+    }
+    .value-badge {
+        color: white;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        white-space: nowrap;
+    }
+    .badge-exceptional { background-color: #238636; }
+    .badge-high { background-color: #1f6feb; }
+    .badge-fair { background-color: #9e6a03; }
+</style>
+"""
+
 
 def highlight_qualified(row: pd.Series) -> list[str]:
     return [QUALIFIED_BG if row.get("qualified") else "" for _ in row]
+
+
+def value_rating(ev: float) -> tuple[str, str]:
+    """Map raw EV to a layman value-rating badge (css class, label)."""
+    if ev >= EXCEPTIONAL_EV:
+        return "badge-exceptional", "Exceptional Value"
+    if ev >= HIGH_EV:
+        return "badge-high", "High Value"
+    return "badge-fair", "Fair Value"
 
 
 @st.cache_data(show_spinner=False)
@@ -48,8 +87,13 @@ def _cached_historical_download(leagues: tuple[str, ...], seasons_back: int, _se
 settings = load_settings()
 league_options = list(settings["leagues"].keys())
 
-st.title("Draw Value Prediction Engine — Football Big 5")
-st.caption("Dixon-Coles model probabilities vs. de-vigged market consensus, EV-ranked, Kelly-sized.")
+st.markdown(CARD_CSS, unsafe_allow_html=True)
+
+st.title("⚽ Matchday Draw Finder")
+st.caption(
+    "Draw Value Prediction Engine — matches where bookmakers are pricing a tie "
+    "significantly lower than expected."
+)
 
 # --------------------------------------------------------------------------
 # Sidebar: data sources + run controls
@@ -176,45 +220,80 @@ else:
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Qualified Plays", f"{len(qualified)} Matches")
-    c2.metric("Total Slate Exposure", f"{qualified['stake_pct'].sum():.1%}")
-    c3.metric("Top Edge", f"+{qualified['ev'].max():.1%}" if not qualified.empty else "—")
+    c2.metric("Total Suggested Stake", f"{qualified['stake_pct'].sum():.1%}")
+    c3.metric("Top Value", f"+{qualified['ev'].max():.1%}" if not qualified.empty else "—")
     st.caption(f"Scanned {len(predictions)} fixtures on this slate.")
 
     st.divider()
     st.subheader("🎯 Matchday Value Picks")
 
-    top_picks = qualified.head(MAX_CARDS)
     mappings = load_team_mappings()
     league_names = {lg: build_display_names(lg, mappings) for lg in predictions["league"].unique()}
 
     def team_name(code: str, league: str) -> str:
         return league_names.get(league, {}).get(code, code)
 
-    if top_picks.empty:
-        st.info("No fixtures meet the +3% EV threshold on this slate.")
+    # Sort/filter bar + a bankroll figure so "Suggested Play" can show a
+    # dollar amount, not just an abstract percentage.
+    c_filter1, c_filter2, c_filter3 = st.columns([2, 2, 2])
+    with c_filter1:
+        sort_by = st.selectbox(
+            "Sort matches by", ["Kickoff Date (Earliest first)", "Highest Value First"], index=0,
+        )
+    with c_filter2:
+        max_cards = st.slider("Matches to display", min_value=3, max_value=MAX_CARDS, value=6)
+    with c_filter3:
+        bankroll = st.number_input("Bankroll ($)", min_value=0, value=1000, step=100)
+
+    if sort_by == "Kickoff Date (Earliest first)":
+        top_picks = qualified.sort_values("date", ascending=True).head(max_cards)
     else:
-        for _, row in top_picks.iterrows():
-            with st.container(border=True):
-                c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
+        top_picks = qualified.sort_values("ev", ascending=False).head(max_cards)
 
-                date_str = pd.to_datetime(row["date"]).strftime("%a, %b %d")
-                home, away = team_name(row["home_team"], row["league"]), team_name(row["away_team"], row["league"])
-                c1.markdown(f"**{home} vs {away}**")
-                c1.caption(f"{settings['leagues'].get(row['league'], row['league'])} • {date_str}")
+    if top_picks.empty:
+        st.info("No standout draw value opportunities on this slate.")
+    else:
+        rows = list(top_picks.iterrows())
+        for i in range(0, len(rows), 2):
+            pair = rows[i:i + 2]
+            cols = st.columns(2)
+            for col, (_, row) in zip(cols, pair):
+                with col, st.container(border=True):
+                    st.markdown('<div class="match-card-marker"></div>', unsafe_allow_html=True)
 
-                c2.metric("Draw Odds", f"{row['odds_draw']:.2f}")
-                c3.metric(
-                    "Model vs Market",
-                    f"{row['model_p_draw']:.1%}",
-                    delta=f"+{(row['model_p_draw'] - row['market_p_draw']):.1%}",
-                )
-                c4.metric("Edge (EV)", f"+{row['ev']:.1%}")
-                c5.metric("Stake", f"{row['stake_pct']:.2%}")
-
-                with st.expander("Show tactical metrics"):
-                    st.write(
-                        f"Projected xG: **{home}** ({row['xg_home']:.2f}) — **{away}** ({row['xg_away']:.2f})"
+                    badge_class, badge_text = value_rating(row["ev"])
+                    date_str = pd.to_datetime(row["date"]).strftime("%a, %b %d")
+                    league_full = settings["leagues"].get(row["league"], row["league"])
+                    st.markdown(
+                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
+                        f"<span style='color:#8b949e; font-size:13px;'>{league_full} • {date_str}</span>"
+                        f"<span class='value-badge {badge_class}'>{badge_text}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
                     )
+
+                    home = team_name(row["home_team"], row["league"])
+                    away = team_name(row["away_team"], row["league"])
+                    st.markdown(f"### {home} vs {away}")
+
+                    m1, m2 = st.columns(2)
+                    m1.metric("Payout Price", f"{row['odds_draw']:.2f}")
+                    m2.metric("Suggested Play", f"{row['stake_pct']:.1%}")
+
+                    dollar_amount = row["stake_pct"] * bankroll
+                    st.caption(
+                        f"💡 Suggests placing **{row['stake_pct']:.1%}** of bankroll "
+                        f"(**${dollar_amount:,.0f}** on ${bankroll:,.0f}) on a draw result."
+                    )
+
+                    with st.expander("Advanced stats"):
+                        st.write(
+                            f"Projected xG: **{home}** ({row['xg_home']:.2f}) — **{away}** ({row['xg_away']:.2f})"
+                        )
+                        st.caption(
+                            f"Model draw probability {row['model_p_draw']:.1%} vs. "
+                            f"market {row['market_p_draw']:.1%}."
+                        )
 
     with st.expander(f"Show full fixture list ({len(predictions)} scanned, including non-qualified)"):
         display_cols = [
