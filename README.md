@@ -75,6 +75,33 @@ app.py           Streamlit dashboard — Matchday (home) page
 pages/           Streamlit dashboard — Model Diagnostics, Backtest, Ledger pages
 ```
 
+## Deployment
+
+Streamlit needs a persistent Python process with an open WebSocket
+connection, so it cannot run on static-site or Vercel-style serverless
+hosting — those platforms deploy prebuilt HTML/JS and have no long-lived
+server to attach to. Use a host built for long-running processes instead:
+
+**Streamlit Community Cloud (recommended — free, zero infra)**
+1. Push this repo to GitHub (public, or private on a paid plan).
+2. Go to [share.streamlit.io](https://share.streamlit.io), sign in, and
+   click "New app".
+3. Point it at this repo, branch, and `app.py` as the entry file.
+4. Deploy. `requirements.txt` and `runtime.txt` are picked up automatically.
+
+**Render / Railway (Procfile-based)**
+- Both auto-detect the included `Procfile`
+  (`web: streamlit run app.py --server.port=$PORT --server.address=0.0.0.0`).
+  Connect the repo, and set the start command to the Procfile's `web` line
+  if it isn't picked up automatically.
+
+**Fly.io / any Docker host**
+- The included `Dockerfile` builds a self-contained image exposing port
+  8501: `docker build -t dvpe . && docker run -p 8501:8501 dvpe`.
+
+`.streamlit/config.toml` sets headless mode so none of these need a
+browser to complete setup.
+
 ## Guardrails
 
 - **Zero data leakage:** the walk-forward backtest (`src/validation/backtest.py`)
