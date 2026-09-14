@@ -33,25 +33,42 @@ HIGH_EV = 0.08
 CARD_CSS = """
 <style>
     div[data-testid="stVerticalBlockBorderWrapper"]:has(div.match-card-marker) {
-        border-radius: 12px;
-        transition: transform 0.15s ease, border-color 0.15s ease;
+        border-radius: 14px;
+        background: linear-gradient(145deg, #131722, #181e2b);
+        border: 1px solid #232d3f;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+        transition: all 0.2s ease-in-out;
     }
     div[data-testid="stVerticalBlockBorderWrapper"]:has(div.match-card-marker):hover {
-        border-color: #58a6ff;
-        transform: translateY(-2px);
+        border-color: #3b82f6;
+        box-shadow: 0 6px 24px rgba(59, 130, 246, 0.15);
+        transform: translateY(-3px);
     }
     .value-badge {
         color: white;
-        padding: 3px 8px;
-        border-radius: 6px;
+        font-weight: 700;
         font-size: 11px;
-        font-weight: 600;
+        letter-spacing: 0.5px;
+        padding: 4px 10px;
+        border-radius: 20px;
         text-transform: uppercase;
         white-space: nowrap;
     }
-    .badge-exceptional { background-color: #238636; }
-    .badge-high { background-color: #1f6feb; }
-    .badge-fair { background-color: #9e6a03; }
+    .badge-tier-1 {
+        background: linear-gradient(135deg, #059669, #10b981);
+        box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+    }
+    .badge-tier-2 { background: linear-gradient(135deg, #2563eb, #3b82f6); }
+    .badge-tier-3 { background: linear-gradient(135deg, #b45309, #f59e0b); }
+    .payout-box {
+        background: rgba(16, 185, 129, 0.08);
+        border-left: 3px solid #10b981;
+        padding: 8px 12px;
+        border-radius: 6px;
+        margin-top: 10px;
+        font-size: 13px;
+        color: #e2e8f0;
+    }
 </style>
 """
 
@@ -63,10 +80,10 @@ def highlight_qualified(row: pd.Series) -> list[str]:
 def value_rating(ev: float) -> tuple[str, str]:
     """Map raw EV to a layman value-rating badge (css class, label)."""
     if ev >= EXCEPTIONAL_EV:
-        return "badge-exceptional", "Exceptional Value"
+        return "badge-tier-1", "EXCEPTIONAL VALUE"
     if ev >= HIGH_EV:
-        return "badge-high", "High Value"
-    return "badge-fair", "Fair Value"
+        return "badge-tier-2", "STRONG VALUE"
+    return "badge-tier-3", "FAIR VALUE"
 
 
 @st.cache_data(show_spinner=False)
@@ -88,12 +105,6 @@ settings = load_settings()
 league_options = list(settings["leagues"].keys())
 
 st.markdown(CARD_CSS, unsafe_allow_html=True)
-
-st.title("⚽ Matchday Draw Finder")
-st.caption(
-    "Draw Value Prediction Engine — matches where bookmakers are pricing a tie "
-    "significantly lower than expected."
-)
 
 # --------------------------------------------------------------------------
 # Sidebar: data sources + run controls
@@ -202,21 +213,33 @@ predictions: pd.DataFrame = st.session_state.get("predictions", pd.DataFrame())
 model = st.session_state.get("model")
 
 # --------------------------------------------------------------------------
+# Header — title + an unobtrusive model-health pill (not a jargon-dump
+# banner; the full mu0/gamma/rho/converged readout lives on the Model
+# Diagnostics page). Rendered here, after `model` is resolved from
+# session_state, so it reflects the run that was just triggered below
+# rather than lagging a step behind it.
+# --------------------------------------------------------------------------
+c_title, c_status = st.columns([3, 1])
+with c_title:
+    st.title("⚽ Matchday Draw Finder")
+    st.caption("Quantitative signals uncovering undervalued draw outcomes across Big 5 leagues.")
+with c_status:
+    if model is not None and (model.fallback_used_ or not model.converged_):
+        st.markdown(
+            "<div style='text-align:right; padding-top:15px;'>"
+            "<span title='Optimizer fell back to an independent Poisson model — see Model Diagnostics for details' "
+            "style='background:#334155; color:#94a3b8; padding:4px 10px; border-radius:12px; font-size:12px;'>"
+            "⚡ Poisson Fallback Active</span></div>",
+            unsafe_allow_html=True,
+        )
+
+# --------------------------------------------------------------------------
 # Results — a matchday decision view, not an optimizer debug dump.
 # --------------------------------------------------------------------------
 if predictions.empty:
     st.info("Configure a data source in the sidebar and click **Run pipeline** to score upcoming fixtures.")
 else:
     qualified = predictions[predictions["qualified"]].sort_values("ev", ascending=False)
-
-    # Model health is surfaced as a single unobtrusive flag, not raw
-    # optimizer parameters — the full mu0/gamma/rho/converged readout
-    # lives on the Model Diagnostics page.
-    if model is not None and (model.fallback_used_ or not model.converged_):
-        st.warning(
-            "⚠️ Reduced model confidence on this run (optimizer fallback or non-convergence). "
-            "See the **Model Diagnostics** page before acting on these picks."
-        )
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Qualified Plays", f"{len(qualified)} Matches")
@@ -233,20 +256,22 @@ else:
     def team_name(code: str, league: str) -> str:
         return league_names.get(league, {}).get(code, code)
 
-    # Sort/filter bar + a bankroll figure so "Suggested Play" can show a
-    # dollar amount, not just an abstract percentage.
+    # Control panel: bankroll + sort + how many cards, so "Recommended
+    # Stake" below can show a dollar amount, not just an abstract percentage.
     c_filter1, c_filter2, c_filter3 = st.columns([2, 2, 2])
     with c_filter1:
-        sort_by = st.selectbox(
-            "Sort matches by", ["Kickoff Date (Earliest first)", "Highest Value First"], index=0,
-        )
+        bankroll = st.number_input("Your Total Bankroll ($)", min_value=50, max_value=100_000, value=1000, step=50)
     with c_filter2:
-        max_cards = st.slider("Matches to display", min_value=3, max_value=MAX_CARDS, value=6)
+        sort_choice = st.selectbox(
+            "Sort Order", ["Earliest Match First", "Highest Return First", "Highest Model Confidence"],
+        )
     with c_filter3:
-        bankroll = st.number_input("Bankroll ($)", min_value=0, value=1000, step=100)
+        max_cards = st.slider("Matches Displayed", min_value=2, max_value=MAX_CARDS, value=6)
 
-    if sort_by == "Kickoff Date (Earliest first)":
+    if sort_choice == "Earliest Match First":
         top_picks = qualified.sort_values("date", ascending=True).head(max_cards)
+    elif sort_choice == "Highest Return First":
+        top_picks = qualified.sort_values("odds_draw", ascending=False).head(max_cards)
     else:
         top_picks = qualified.sort_values("ev", ascending=False).head(max_cards)
 
@@ -274,25 +299,42 @@ else:
 
                     home = team_name(row["home_team"], row["league"])
                     away = team_name(row["away_team"], row["league"])
-                    st.markdown(f"### {home} vs {away}")
-
-                    m1, m2 = st.columns(2)
-                    m1.metric("Payout Price", f"{row['odds_draw']:.2f}")
-                    m2.metric("Suggested Play", f"{row['stake_pct']:.1%}")
-
-                    dollar_amount = row["stake_pct"] * bankroll
-                    st.caption(
-                        f"💡 Suggests placing **{row['stake_pct']:.1%}** of bankroll "
-                        f"(**${dollar_amount:,.0f}** on ${bankroll:,.0f}) on a draw result."
+                    st.markdown(
+                        f"<h3 style='margin:0 0 12px 0; font-size:1.25rem;'>{home} "
+                        f"<span style='color:#64748b;'>vs</span> {away}</h3>",
+                        unsafe_allow_html=True,
                     )
 
-                    with st.expander("Advanced stats"):
-                        st.write(
-                            f"Projected xG: **{home}** ({row['xg_home']:.2f}) — **{away}** ({row['xg_away']:.2f})"
+                    # odds_draw is decimal odds — the return multiplier per $1
+                    # staked (Total Return = Stake x odds_draw), not a fixed
+                    # payout tied to any particular stake size.
+                    odds = float(row["odds_draw"])
+                    stake_pct = float(row["stake_pct"])  # already a bankroll fraction, e.g. 0.025 = 2.5%
+                    stake_dollars = round(bankroll * stake_pct, 2)
+                    total_return = round(stake_dollars * odds, 2)
+                    profit = round(total_return - stake_dollars, 2)
+
+                    m1, m2 = st.columns(2)
+                    m1.metric("Odds Multiplier", f"{odds:.2f}x")
+                    m2.metric(
+                        "Recommended Stake", f"${stake_dollars:,.0f}",
+                        help=f"{stake_pct:.1%} of your ${bankroll:,.0f} bankroll",
+                    )
+
+                    st.markdown(
+                        f"<div class='payout-box'>💰 Stake <strong>${stake_dollars:,.2f}</strong> to win "
+                        f"<strong>${total_return:,.2f}</strong> "
+                        f"<span style='color:#10b981; font-weight:600;'>(+${profit:,.2f} profit)</span></div>",
+                        unsafe_allow_html=True,
+                    )
+
+                    with st.expander("Technical model breakdown"):
+                        st.caption(
+                            f"Estimated draw probability: {row['model_p_draw']:.1%} | "
+                            f"Market implied: {row['market_p_draw']:.1%}"
                         )
                         st.caption(
-                            f"Model draw probability {row['model_p_draw']:.1%} vs. "
-                            f"market {row['market_p_draw']:.1%}."
+                            f"Projected xG: {home} ({row['xg_home']:.2f}) vs {away} ({row['xg_away']:.2f})"
                         )
 
     with st.expander(f"Show full fixture list ({len(predictions)} scanned, including non-qualified)"):
