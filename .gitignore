@@ -11,3 +11,6 @@ data/ledger.parquet
 data/ledger.csv
 
 .DS_Store
+
+# Never commit secrets (Supabase URL/key, Odds API key, RG_URL overrides, etc.)
+.streamlit/secrets.toml

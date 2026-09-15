@@ -11,6 +11,7 @@ fully explorable without a network round-trip.
 from __future__ import annotations
 
 import os
+import uuid
 
 import pandas as pd
 import streamlit as st
@@ -32,6 +33,7 @@ from src.ingestion.sources import (
 )
 from src.pipeline import build_predictions, fit_model, load_historical_matches, record_ledger
 from src.tracking.ledger import Ledger
+from src.tracking.supabase_ledger import get_supabase_client, prediction_row_from_pipeline, write_predictions
 
 st.set_page_config(page_title="Matchday Score Predictor | Big 5 Leagues", page_icon="⚽", layout="wide")
 
@@ -89,10 +91,9 @@ CARD_CSS = """
         font-weight: 700;
         letter-spacing: 0.05em;
     }
-    .badge-ev-play {
-        background: rgba(245, 158, 11, 0.2);
-        color: #fbbf24;
-        border: 1px solid #b45309;
+    .badge-forecast-only {
+        background: #334155;
+        color: #f8fafc;
         padding: 3px 10px;
         border-radius: 9999px;
         font-size: 0.72rem;
@@ -161,15 +162,34 @@ def _resolve_odds_api_key() -> str:
         return ""
 
 
+def _resolve_rg_url() -> str:
+    """Configurable Responsible Gambling resource link — env/secrets
+    override, defaulting to BeGambleAware."""
+    url = os.environ.get("RG_URL", "")
+    if url:
+        return url
+    try:
+        return st.secrets.get("RG_URL", "https://www.begambleaware.org/")
+    except Exception:
+        return "https://www.begambleaware.org/"
+
+
 settings = load_settings()
 league_options = list(settings["leagues"].keys())
 
 st.markdown(CARD_CSS, unsafe_allow_html=True)
 
+st.warning(
+    f"**NOT FINANCIAL ADVICE.** This system is under technical validation. Outputs are "
+    f"forecasting research only, not a recommendation to place a bet. "
+    f"[Responsible Gambling Resources]({_resolve_rg_url()})"
+)
+
 # --------------------------------------------------------------------------
 # Sidebar: data sources + run controls
 # --------------------------------------------------------------------------
 with st.sidebar:
+    st.caption(f"⚠️ Forecast research only — not financial advice. [Responsible Gambling]({_resolve_rg_url()})")
     st.header("1. Historical & Market Data Sources")
 
     # Demo vs. online is a mode (a synthetic generator vs. real ingestion —
@@ -316,13 +336,54 @@ if run_clicked:
 
     predictions = build_predictions(fixtures, model, settings)
     if record_to_ledger:
-        record_ledger(predictions, settings)
+        try:
+            record_ledger(predictions, settings)
+            st.session_state["ledger_status"] = "OK"
+        except Exception as exc:  # noqa: BLE001 — surface in the UI, never fail the run over a logging write
+            st.session_state["ledger_failed_writes"] = st.session_state.get("ledger_failed_writes", 0) + len(predictions)
+            st.session_state["ledger_status"] = f"write error ({exc})"
+
+        # Durable remote copy (PID Phase 0) — additive, never blocks the
+        # local ledger or the run itself. Skips cleanly if Supabase isn't
+        # configured; get_supabase_client/write_predictions never raise.
+        run_id = str(uuid.uuid4())
+        sb_client = get_supabase_client()
+        if sb_client is None:
+            st.session_state["supabase_ledger_status"] = "Not configured"
+        else:
+            sb_rows = [
+                prediction_row_from_pipeline(row, run_id, model, settings, fixture_source_used)
+                for _, row in predictions.iterrows()
+            ]
+            sb_failed = write_predictions(sb_rows, client=sb_client)
+            prior_failed = st.session_state.get("supabase_ledger_failed_writes", 0)
+            st.session_state["supabase_ledger_failed_writes"] = prior_failed + sb_failed
+            st.session_state["supabase_ledger_status"] = "OK" if sb_failed == 0 else f"{sb_failed} row(s) failed this run"
 
     st.session_state["fixture_source_used"] = fixture_source_used
     st.session_state["model"] = model
     st.session_state["matches"] = matches
     st.session_state["predictions"] = predictions
     st.session_state["settings"] = settings
+
+with st.sidebar:
+    st.divider()
+    st.markdown("### System Health")
+    _ledger_status = st.session_state.get("ledger_status", "Not yet run")
+    _failed_writes = st.session_state.get("ledger_failed_writes", 0)
+    if _failed_writes > 0 or "error" in _ledger_status.lower():
+        st.error(f"Local ledger: {_ledger_status} | Failed writes: {_failed_writes}")
+    else:
+        st.success(f"Local ledger: {_ledger_status} | Failed writes: 0")
+
+    _sb_status = st.session_state.get("supabase_ledger_status", "Not configured")
+    _sb_failed = st.session_state.get("supabase_ledger_failed_writes", 0)
+    if _sb_failed > 0 or "error" in _sb_status.lower() or "fail" in _sb_status.lower():
+        st.error(f"Supabase ledger: {_sb_status} | Failed writes: {_sb_failed}")
+    elif "not configured" in _sb_status.lower():
+        st.info(f"Supabase ledger: {_sb_status}")
+    else:
+        st.success(f"Supabase ledger: {_sb_status} | Failed writes: 0")
 
 predictions: pd.DataFrame = st.session_state.get("predictions", pd.DataFrame())
 model = st.session_state.get("model")
@@ -424,17 +485,16 @@ else:
                 is_high_tie = match["model_p_draw"] >= HIGH_TIE_P_DRAW
                 tie_badge_class = "badge-draw-high" if is_high_tie else "badge-draw-med"
                 tie_badge_label = "HIGH TIE POTENTIAL" if is_high_tie else "MODERATE TIE CHANCE"
-                ev_badge = (
-                    "<span class='badge-ev-play' style='margin-left:6px;'>✓ +EV PLAY</span>"
-                    if match["qualified"] else ""
-                )
 
                 date_str = pd.to_datetime(match["date"]).strftime("%a, %b %d")
                 league_full = settings["leagues"].get(match["league"], match["league"])
                 st.markdown(
                     f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
                     f"<span class='league-pill'>{league_full} • {date_str}</span>"
-                    f"<span><span class='{tie_badge_class}'>{tie_badge_label}</span>{ev_badge}</span>"
+                    f"<span>"
+                    f"<span class='{tie_badge_class}'>{tie_badge_label}</span>"
+                    f"<span class='badge-forecast-only' style='margin-left:6px;'>FORECAST ONLY</span>"
+                    f"</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )

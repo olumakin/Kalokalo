@@ -7,3 +7,8 @@ pytest>=7.4
 streamlit>=1.28
 requests>=2.31
 PyYAML>=6.0
+# supabase>=2.10 is required for the new sb_publishable_/sb_secret_ key
+# format (Supabase's newer key scheme) — 2.3.0 rejects it locally via a
+# hardcoded JWT-shaped regex before ever making a network call. Pinned
+# to what was actually verified against real credentials in this repo.
+supabase==2.31.0
