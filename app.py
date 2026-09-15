@@ -429,141 +429,163 @@ if predictions.empty:
     st.info("Configure a data source in the sidebar and click **Run pipeline** to score upcoming fixtures.")
 else:
     mappings = load_team_mappings()
-    league_names = {lg: build_display_names(lg, mappings) for lg in predictions["league"].unique()}
 
-    def team_name(code: str, league: str) -> str:
-        return league_names.get(league, {}).get(code, code)
-
-    _feed_notes = {
-        FIXTURE_SOURCE_LIVE_ODDS: "Live Odds API (Consensus)",
-        FIXTURE_SOURCE_FREE_SCHEDULE: "football-data.co.uk (Free)",
-    }
-    feed_label = _feed_notes.get(st.session_state.get("fixture_source_used"), "Bundled sample fixture card")
-
-    st.markdown(
-        f"""
-            <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
-                <span style="background:#1e293b; color:#38bdf8; border:1px solid #334155;
-                             padding:4px 12px; border-radius:9999px; font-size:12px; font-weight:600;">
-                    Feed: {feed_label}
-                </span>
-            </div>
-        """,
-        unsafe_allow_html=True,
+    # Display-only filter over the last pipeline run's already-scored
+    # fixtures (st.session_state["predictions"], column "league") — it
+    # does not re-fetch or re-fit anything. Options are whichever
+    # leagues actually came back in this run (not a fixed 5, since the
+    # sample-card/live-odds fallback tiers can each cover a different
+    # subset — see get_upcoming_fixtures in src/ingestion/odds_feed.py).
+    available_leagues = sorted(predictions["league"].unique().tolist())
+    selected_leagues = st.multiselect(
+        "Active Competitions", options=available_leagues, default=available_leagues,
+        format_func=lambda c: settings["leagues"].get(c, f"Unknown code: {c}"),
+        key="active_competitions_filter",
+        help="Filters the fixtures scored by the last pipeline run below — does not re-run the pipeline.",
     )
 
-    # High-level summary row
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Matches Analyzed", f"{len(predictions)} Fixtures")
-    avg_draw_prob = predictions["model_p_draw"].mean()
-    col2.metric("Average Tie Likelihood", f"{avg_draw_prob:.1%}")
-    top_tie = predictions.sort_values("model_p_draw", ascending=False).iloc[0]
-    col3.metric(
-        "Top Tie Candidate",
-        f"{team_name(top_tie['home_team'], top_tie['league'])} vs {team_name(top_tie['away_team'], top_tie['league'])}",
-    )
+    filtered_predictions = predictions[predictions["league"].isin(selected_leagues)] if selected_leagues else predictions.iloc[0:0]
 
-    st.write("")
-
-    # Control panel: sort + how many cards.
-    c_sort, c_limit = st.columns([2, 1])
-    with c_sort:
-        sort_mode = st.selectbox(
-            "Order Matches By", ["Earliest Kickoff Date", "Highest Tie Likelihood", "Highest Total xG"],
-        )
-    with c_limit:
-        card_limit = st.slider("Matches Displayed", min_value=2, max_value=MAX_CARDS, value=6)
-
-    if sort_mode == "Earliest Kickoff Date":
-        display_df = predictions.sort_values("date", ascending=True)
-    elif sort_mode == "Highest Tie Likelihood":
-        display_df = predictions.sort_values("model_p_draw", ascending=False)
+    if not selected_leagues:
+        st.info("Select at least one competition above to view matches.")
+    elif filtered_predictions.empty:
+        st.warning("No fixtures for the selected competition(s) in the last pipeline run.")
     else:
-        display_df = predictions.assign(total_xg=predictions["xg_home"] + predictions["xg_away"]).sort_values(
-            "total_xg", ascending=False
+        league_names = {lg: build_display_names(lg, mappings) for lg in filtered_predictions["league"].unique()}
+
+        def team_name(code: str, league: str) -> str:
+            return league_names.get(league, {}).get(code, code)
+
+        _feed_notes = {
+            FIXTURE_SOURCE_LIVE_ODDS: "Live Odds API (Consensus)",
+            FIXTURE_SOURCE_FREE_SCHEDULE: "football-data.co.uk (Free)",
+        }
+        feed_label = _feed_notes.get(st.session_state.get("fixture_source_used"), "Bundled sample fixture card")
+
+        st.markdown(
+            f"""
+                <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
+                    <span style="background:#1e293b; color:#38bdf8; border:1px solid #334155;
+                                 padding:4px 12px; border-radius:9999px; font-size:12px; font-weight:600;">
+                        Feed: {feed_label}
+                    </span>
+                </div>
+            """,
+            unsafe_allow_html=True,
         )
-    display_df = display_df.head(card_limit)
 
-    rows = list(display_df.iterrows())
-    for i in range(0, len(rows), 2):
-        pair = rows[i:i + 2]
-        cols = st.columns(2)
-        for col, (_, match) in zip(cols, pair):
-            with col, st.container(border=True):
-                is_high_tie = match["model_p_draw"] >= HIGH_TIE_P_DRAW
-                tie_badge_class = "badge-draw-high" if is_high_tie else "badge-draw-med"
-                tie_badge_label = "HIGH TIE POTENTIAL" if is_high_tie else "MODERATE TIE CHANCE"
+        # High-level summary row — strictly on the filtered view.
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Matches Analyzed", f"{len(filtered_predictions)} Fixtures")
+        avg_draw_prob = filtered_predictions["model_p_draw"].mean()
+        col2.metric("Average Tie Likelihood", f"{avg_draw_prob:.1%}")
+        top_tie = filtered_predictions.sort_values("model_p_draw", ascending=False).iloc[0]
+        col3.metric(
+            "Top Tie Candidate",
+            f"{team_name(top_tie['home_team'], top_tie['league'])} vs {team_name(top_tie['away_team'], top_tie['league'])}",
+        )
 
-                date_str = pd.to_datetime(match["date"]).strftime("%a, %b %d")
-                league_full = settings["leagues"].get(match["league"], match["league"])
-                st.markdown(
-                    f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                    f"<span class='league-pill'>{league_full} • {date_str}</span>"
-                    f"<span>"
-                    f"<span class='{tie_badge_class}'>{tie_badge_label}</span>"
-                    f"<span class='badge-forecast-only' style='margin-left:6px;'>FORECAST ONLY</span>"
-                    f"</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
+        st.write("")
 
-                home = team_name(match["home_team"], match["league"])
-                away = team_name(match["away_team"], match["league"])
-                st.markdown(
-                    f"<h3 style='margin:8px 0 2px 0;'>{home} "
-                    f"<span style='color:#64748b; font-weight:400;'>vs</span> {away}</h3>",
-                    unsafe_allow_html=True,
-                )
+        # Control panel: sort + how many cards.
+        c_sort, c_limit = st.columns([2, 1])
+        with c_sort:
+            sort_mode = st.selectbox(
+                "Order Matches By", ["Earliest Kickoff Date", "Highest Tie Likelihood", "Highest Total xG"],
+            )
+        with c_limit:
+            card_limit = st.slider("Matches Displayed", min_value=2, max_value=MAX_CARDS, value=6)
 
-                st.markdown(
-                    f"""
-                        <div class="score-box">
-                            <div style="font-size:0.72rem; text-transform:uppercase; color:#38bdf8; font-weight:700; letter-spacing:0.05em;">Most Likely Final Score</div>
-                            <div class="score-primary">{match['top_score']}</div>
-                            <div class="score-runnerup">Alternative: <strong>{match['alt_score']}</strong> ({match['alt_score_prob']:.0%} chance)</div>
-                        </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+        if sort_mode == "Earliest Kickoff Date":
+            display_df = filtered_predictions.sort_values("date", ascending=True)
+        elif sort_mode == "Highest Tie Likelihood":
+            display_df = filtered_predictions.sort_values("model_p_draw", ascending=False)
+        else:
+            display_df = filtered_predictions.assign(
+                total_xg=filtered_predictions["xg_home"] + filtered_predictions["xg_away"]
+            ).sort_values("total_xg", ascending=False)
+        display_df = display_df.head(card_limit)
 
-                g1, g2, g3 = st.columns(3)
-                g1.metric("Home xG", f"{match['xg_home']:.2f}")
-                g2.metric("Draw Chance", f"{match['model_p_draw']:.1%}")
-                g3.metric("Away xG", f"{match['xg_away']:.2f}")
+        rows = list(display_df.iterrows())
+        for i in range(0, len(rows), 2):
+            pair = rows[i:i + 2]
+            cols = st.columns(2)
+            for col, (_, match) in zip(cols, pair):
+                with col, st.container(border=True):
+                    is_high_tie = match["model_p_draw"] >= HIGH_TIE_P_DRAW
+                    tie_badge_class = "badge-draw-high" if is_high_tie else "badge-draw-med"
+                    tie_badge_label = "HIGH TIE POTENTIAL" if is_high_tie else "MODERATE TIE CHANCE"
 
-                p_h = round(match["model_p_home"] * 100)
-                p_d = round(match["model_p_draw"] * 100)
-                p_a = round(match["model_p_away"] * 100)
-                st.caption(f"Forecast: **{home}** {p_h}% | **Draw** {p_d}% | **{away}** {p_a}%")
-                st.progress(min(max(p_h / 100.0, 0.0), 1.0))
+                    date_str = pd.to_datetime(match["date"]).strftime("%a, %b %d")
+                    league_full = settings["leagues"].get(match["league"], match["league"])
+                    st.markdown(
+                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
+                        f"<span class='league-pill'>{league_full} • {date_str}</span>"
+                        f"<span>"
+                        f"<span class='{tie_badge_class}'>{tie_badge_label}</span>"
+                        f"<span class='badge-forecast-only' style='margin-left:6px;'>FORECAST ONLY</span>"
+                        f"</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
 
-                if match["qualified"]:
-                    with st.expander("Betting value analysis"):
-                        st.caption(
-                            f"Model draw probability {match['model_p_draw']:.1%} vs. market "
-                            f"{match['market_p_draw']:.1%} → **{match['ev']:+.1%} EV**, "
-                            f"{match['stake_pct']:.1%} of bankroll recommended (Fractional Kelly, capped)."
-                        )
+                    home = team_name(match["home_team"], match["league"])
+                    away = team_name(match["away_team"], match["league"])
+                    st.markdown(
+                        f"<h3 style='margin:8px 0 2px 0;'>{home} "
+                        f"<span style='color:#64748b; font-weight:400;'>vs</span> {away}</h3>",
+                        unsafe_allow_html=True,
+                    )
 
-    with st.expander(f"Show full fixture list ({len(predictions)} scanned, including non-qualified)"):
-        display_cols = [
-            "date", "league", "home_team", "away_team", "xg_home", "xg_away",
-            "model_p_draw", "market_p_draw", "odds_draw", "ev", "qualified", "stake_pct",
-        ]
-        styled = predictions[display_cols].style.apply(highlight_qualified, axis=1).format({
-            "date": lambda d: pd.to_datetime(d).strftime("%d %b %Y"),
-            "xg_home": "{:.2f}", "xg_away": "{:.2f}",
-            "model_p_draw": "{:.1%}", "market_p_draw": "{:.1%}",
-            "odds_draw": "{:.2f}", "ev": "{:+.1%}", "stake_pct": "{:.2%}",
-        })
-        st.dataframe(styled, use_container_width=True, height=min(60 + 35 * len(predictions), 600))
+                    st.markdown(
+                        f"""
+                            <div class="score-box">
+                                <div style="font-size:0.72rem; text-transform:uppercase; color:#38bdf8; font-weight:700; letter-spacing:0.05em;">Most Likely Final Score</div>
+                                <div class="score-primary">{match['top_score']}</div>
+                                <div class="score-runnerup">Alternative: <strong>{match['alt_score']}</strong> ({match['alt_score_prob']:.0%} chance)</div>
+                            </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
-    st.download_button(
-        "Download predictions (CSV)",
-        predictions.to_csv(index=False).encode("utf-8"),
-        file_name="dvpe_predictions.csv",
-        mime="text/csv",
-    )
+                    g1, g2, g3 = st.columns(3)
+                    g1.metric("Home xG", f"{match['xg_home']:.2f}")
+                    g2.metric("Draw Chance", f"{match['model_p_draw']:.1%}")
+                    g3.metric("Away xG", f"{match['xg_away']:.2f}")
+
+                    p_h = round(match["model_p_home"] * 100)
+                    p_d = round(match["model_p_draw"] * 100)
+                    p_a = round(match["model_p_away"] * 100)
+                    st.caption(f"Forecast: **{home}** {p_h}% | **Draw** {p_d}% | **{away}** {p_a}%")
+                    st.progress(min(max(p_h / 100.0, 0.0), 1.0))
+
+                    if match["qualified"]:
+                        with st.expander("Betting value analysis"):
+                            st.caption(
+                                f"Model draw probability {match['model_p_draw']:.1%} vs. market "
+                                f"{match['market_p_draw']:.1%} → **{match['ev']:+.1%} EV**, "
+                                f"{match['stake_pct']:.1%} of bankroll recommended (Fractional Kelly, capped)."
+                            )
+
+        with st.expander(f"Show full fixture list ({len(filtered_predictions)} scanned, including non-qualified)"):
+            display_cols = [
+                "date", "league", "home_team", "away_team", "xg_home", "xg_away",
+                "model_p_draw", "market_p_draw", "odds_draw", "ev", "qualified", "stake_pct",
+            ]
+            styled = filtered_predictions[display_cols].style.apply(highlight_qualified, axis=1).format({
+                "date": lambda d: pd.to_datetime(d).strftime("%d %b %Y"),
+                "xg_home": "{:.2f}", "xg_away": "{:.2f}",
+                "model_p_draw": "{:.1%}", "market_p_draw": "{:.1%}",
+                "odds_draw": "{:.2f}", "ev": "{:+.1%}", "stake_pct": "{:.2%}",
+            })
+            st.dataframe(styled, use_container_width=True, height=min(60 + 35 * len(filtered_predictions), 600))
+
+        st.download_button(
+            "Download predictions (CSV)",
+            filtered_predictions.to_csv(index=False).encode("utf-8"),
+            file_name="dvpe_predictions.csv",
+            mime="text/csv",
+        )
 
 st.divider()
 st.subheader("Recent ledger entries")
