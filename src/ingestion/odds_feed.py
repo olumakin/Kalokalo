@@ -256,4 +256,11 @@ def get_upcoming_fixtures(
         return free, FIXTURE_SOURCE_FREE_SCHEDULE
 
     logger.info("No live or free fixture data available for %s; falling back to %s", leagues, fallback_path)
-    return load_fixture_csv(fallback_path), FIXTURE_SOURCE_SAMPLE_CARD
+    # Unlike fetch_live_odds/fetch_free_schedule above, load_fixture_csv
+    # has no `leagues` concept of its own (the CLI's direct call site in
+    # src/pipeline.py wants the whole curated card, unfiltered) — filter
+    # here instead of widening that function's contract.
+    sample = load_fixture_csv(fallback_path)
+    if not sample.empty:
+        sample = sample[sample["league"].isin(leagues)].reset_index(drop=True)
+    return sample, FIXTURE_SOURCE_SAMPLE_CARD

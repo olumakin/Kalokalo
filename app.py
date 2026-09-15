@@ -336,7 +336,14 @@ if run_clicked:
         # get_upcoming_fixtures never raises purely because a remote tier
         # is unreachable — every run in this sandbox hits the final tier,
         # since there's no outbound network access here at all.
-        fixtures, fixture_source_used = _cached_upcoming_fixtures(tuple(league_options), odds_api_key)
+        #
+        # Scoped to whichever leagues actually ended up in `matches` (not
+        # the fixed 5-league `league_options`) — a league the model never
+        # saw historical data for has every team "unseen", so predict()
+        # would silently default both teams to generic league-median
+        # ratings (alpha=beta=0) rather than a real fitted prediction.
+        fixture_leagues = sorted(matches["league"].unique().tolist())
+        fixtures, fixture_source_used = _cached_upcoming_fixtures(tuple(fixture_leagues), odds_api_key)
 
     if fixtures.empty:
         st.error("No fixtures available — live feed, free schedule, and the bundled fixture card all returned nothing.")

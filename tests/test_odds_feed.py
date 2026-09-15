@@ -117,6 +117,18 @@ def fallback_csv(tmp_path):
     return path
 
 
+@pytest.fixture
+def multi_league_fallback_csv(tmp_path):
+    path = tmp_path / "upcoming_multi.csv"
+    path.write_text(
+        "date,league,home_team,away_team,odds_home,odds_draw,odds_away\n"
+        "2026-09-20,E0,Arsenal,Chelsea,2.30,3.40,3.10\n"
+        "2026-09-20,SP1,Real Madrid,Barcelona,2.20,3.30,3.30\n"
+        "2026-09-21,I1,Juventus,Inter,2.10,3.20,3.60\n"
+    )
+    return path
+
+
 FREE_SCHEDULE_CSV = (
     "Div,Date,HomeTeam,AwayTeam,B365H,B365D,B365A\n"
     "E0,20/09/2026,Arsenal,Chelsea,2.10,3.60,3.40\n"
@@ -249,3 +261,30 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
         get_upcoming_fixtures(["E0", "SP1", "I1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
         assert calls == ["E0", "SP1", "I1"]
+
+    def test_sample_card_is_filtered_to_requested_leagues(self, monkeypatch, multi_league_fallback_csv):
+        # A league the model wasn't trained on (not requested here) must
+        # not leak into the sample-card fallback tier — that team pair
+        # would be "unseen" to the model and get a meaningless generic
+        # prediction instead of a real one.
+        monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", _empty_frames)
+        monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
+
+        result, source = get_upcoming_fixtures(
+            ["SP1", "I1"], api_key="test-key-1234567890abcdef", fallback_path=multi_league_fallback_csv,
+        )
+
+        assert source == FIXTURE_SOURCE_SAMPLE_CARD
+        assert set(result["league"]) == {"SP1", "I1"}
+        assert len(result) == 2
+
+    def test_sample_card_unfiltered_when_nothing_matches_requested_leagues(self, monkeypatch, multi_league_fallback_csv):
+        monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", _empty_frames)
+        monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
+
+        result, source = get_upcoming_fixtures(
+            ["D1"], api_key="test-key-1234567890abcdef", fallback_path=multi_league_fallback_csv,
+        )
+
+        assert source == FIXTURE_SOURCE_SAMPLE_CARD
+        assert result.empty
