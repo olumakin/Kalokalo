@@ -23,7 +23,7 @@ from src.ingestion.historical import load_all, load_settings, season_codes
 from src.ingestion.normalizer import normalize_dataframe
 from src.ingestion.odds_feed import load_fixture_csv
 from src.models.dixon_coles import DixonColesModel
-from src.models.simulator import match_probabilities
+from src.models.simulator import match_probabilities, top_scorelines
 from src.tracking.ledger import Ledger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -39,6 +39,7 @@ def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: 
         lam, mu, rho = model.predict(row["home_team"], row["away_team"])
         probs = match_probabilities(lam, mu, rho)
         model_p_draw = probs["p_draw"]
+        (h1, a1, p1), (h2, a2, p2) = top_scorelines(probs["matrix"], n=2)
 
         market_h, market_d, market_a = devig(
             row["odds_home"], row["odds_draw"], row["odds_away"], method=devig_method
@@ -59,6 +60,10 @@ def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: 
             "model_p_home": probs["p_home"],
             "model_p_draw": model_p_draw,
             "model_p_away": probs["p_away"],
+            "top_score": f"{h1}-{a1}",
+            "top_score_prob": p1,
+            "alt_score": f"{h2}-{a2}",
+            "alt_score_prob": p2,
             "market_p_draw": market_d,
             "odds_draw": row["odds_draw"],
             "ev": ev,

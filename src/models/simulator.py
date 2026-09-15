@@ -61,3 +61,15 @@ def match_probabilities(lam: float, mu: float, rho: float, grid_size: int = DEFA
         "p_away": prob_away_win(matrix),
         "matrix": matrix,
     }
+
+
+def top_scorelines(matrix: np.ndarray, n: int = 2) -> list[tuple[int, int, float]]:
+    """Return the `n` most probable (home_goals, away_goals, probability)
+    scorelines from a fitted scoreline matrix (build_score_matrix's
+    output) — real model output, not a simulated/random score."""
+    flat_idx = np.argsort(matrix.ravel())[::-1][:n]
+    results = []
+    for idx in flat_idx:
+        h, a = np.unravel_index(idx, matrix.shape)
+        results.append((int(h), int(a), float(matrix[h, a])))
+    return results

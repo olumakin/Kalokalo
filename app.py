@@ -33,62 +33,90 @@ from src.ingestion.sources import (
 from src.pipeline import build_predictions, fit_model, load_historical_matches, record_ledger
 from src.tracking.ledger import Ledger
 
-st.set_page_config(page_title="DVPE — Draw Value Prediction Engine", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Matchday Score Predictor | Big 5 Leagues", page_icon="⚽", layout="wide")
 
 MAX_CARDS = 10
 QUALIFIED_BG = "background-color: rgba(34, 197, 94, 0.16)"
 
-# Value-rating tiers for qualified plays, relative to the 3% EV qualification
-# floor (config/settings.yaml: edge.min_ev) — not absolute magic numbers.
-EXCEPTIONAL_EV = 0.15
-HIGH_EV = 0.08
+# Draw-likelihood badge threshold on the real model's P(draw) — not an
+# absolute magic number: the PID's +EV qualification floor is 3% edge
+# over market, a different question from "is this draw just likely."
+# 27.5% is comfortably above the Big-5 baseline draw rate (~24-26%).
+HIGH_TIE_P_DRAW = 0.275
 
 CARD_CSS = """
 <style>
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.match-card-marker) {
-        border-radius: 14px;
-        background: linear-gradient(145deg, #131722, #181e2b);
-        border: 1px solid #232d3f;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
-        transition: all 0.2s ease-in-out;
+    .stApp {
+        background-color: #0b0f19;
+        color: #f1f5f9;
     }
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.match-card-marker):hover {
-        border-color: #3b82f6;
-        box-shadow: 0 6px 24px rgba(59, 130, 246, 0.15);
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        border-radius: 16px;
+        background: linear-gradient(145deg, #111827, #1e293b);
+        border: 1px solid #334155;
+        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+        padding: 6px;
+        transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+    div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+        border-color: #38bdf8;
         transform: translateY(-3px);
     }
-    .value-badge {
-        color: white;
+    .league-pill {
+        font-size: 0.75rem;
         font-weight: 700;
-        font-size: 11px;
-        letter-spacing: 0.5px;
-        padding: 4px 10px;
-        border-radius: 20px;
+        letter-spacing: 0.05em;
+        color: #94a3b8;
         text-transform: uppercase;
-        white-space: nowrap;
     }
-    .badge-tier-1 {
-        background: linear-gradient(135deg, #059669, #10b981);
-        box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+    .badge-draw-high {
+        background: rgba(16, 185, 129, 0.2);
+        color: #34d399;
+        border: 1px solid #059669;
+        padding: 3px 10px;
+        border-radius: 9999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
     }
-    .badge-tier-2 { background: linear-gradient(135deg, #2563eb, #3b82f6); }
-    .badge-tier-3 { background: linear-gradient(135deg, #b45309, #f59e0b); }
-    .badge-below-threshold { background: #334155; color: #94a3b8; box-shadow: none; }
-    .payout-box {
-        background: rgba(16, 185, 129, 0.08);
-        border-left: 3px solid #10b981;
-        padding: 8px 12px;
-        border-radius: 6px;
-        margin-top: 10px;
-        font-size: 13px;
-        color: #e2e8f0;
+    .badge-draw-med {
+        background: rgba(59, 130, 246, 0.2);
+        color: #60a5fa;
+        border: 1px solid #2563eb;
+        padding: 3px 10px;
+        border-radius: 9999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
     }
-    /* Sub-threshold "closest misses" cards: visually distinct from a real
-       recommendation — dashed border, no hover glow, dimmed. */
-    div[data-testid="stVerticalBlockBorderWrapper"]:has(div.miss-card-marker) {
-        border-radius: 14px;
-        border: 1px dashed #334155;
-        opacity: 0.75;
+    .badge-ev-play {
+        background: rgba(245, 158, 11, 0.2);
+        color: #fbbf24;
+        border: 1px solid #b45309;
+        padding: 3px 10px;
+        border-radius: 9999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+    }
+    .score-box {
+        background: rgba(15, 23, 42, 0.8);
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 10px 14px;
+        text-align: center;
+        margin: 12px 0;
+    }
+    .score-primary {
+        font-size: 1.6rem;
+        font-weight: 800;
+        color: #f8fafc;
+        letter-spacing: 2px;
+    }
+    .score-runnerup {
+        font-size: 0.8rem;
+        color: #94a3b8;
+        margin-top: 2px;
     }
 </style>
 """
@@ -96,15 +124,6 @@ CARD_CSS = """
 
 def highlight_qualified(row: pd.Series) -> list[str]:
     return [QUALIFIED_BG if row.get("qualified") else "" for _ in row]
-
-
-def value_rating(ev: float) -> tuple[str, str]:
-    """Map raw EV to a layman value-rating badge (css class, label)."""
-    if ev >= EXCEPTIONAL_EV:
-        return "badge-tier-1", "EXCEPTIONAL VALUE"
-    if ev >= HIGH_EV:
-        return "badge-tier-2", "STRONG VALUE"
-    return "badge-tier-3", "FAIR VALUE"
 
 
 @st.cache_data(show_spinner=False)
@@ -314,8 +333,8 @@ model = st.session_state.get("model")
 # --------------------------------------------------------------------------
 c_title, c_status = st.columns([3, 1])
 with c_title:
-    st.title("⚽ Matchday Draw Finder")
-    st.caption("Quantitative signals uncovering undervalued draw outcomes across Big 5 leagues.")
+    st.title("⚽ Matchday Score Predictor")
+    st.caption("Algorithmic scoreline forecasts and deadlock analysis across Europe's top divisions.")
 with c_status:
     if model is not None and (model.fallback_used_ or not model.converged_):
         st.markdown(
@@ -327,17 +346,21 @@ with c_status:
         )
 
 # --------------------------------------------------------------------------
-# Results — a matchday decision view, not an optimizer debug dump.
+# Results — Matchday Score Predictor: real fitted scorelines, xG, and
+# outcome probabilities from the Dixon-Coles model (src/models/simulator.py),
+# not a synthetic/random engine. Every fixture on the slate is shown, not
+# just qualified +EV ones — this is a score predictor first; the PID's
+# draw-value/EV logic still runs underneath and surfaces as a small
+# "+EV PLAY" badge on cards that clear the qualification bar.
 # --------------------------------------------------------------------------
 if predictions.empty:
     st.info("Configure a data source in the sidebar and click **Run pipeline** to score upcoming fixtures.")
 else:
-    qualified = predictions[predictions["qualified"]].sort_values("ev", ascending=False)
+    mappings = load_team_mappings()
+    league_names = {lg: build_display_names(lg, mappings) for lg in predictions["league"].unique()}
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Qualified Plays", f"{len(qualified)} Matches")
-    c2.metric("Total Suggested Stake", f"{qualified['stake_pct'].sum():.1%}")
-    c3.metric("Top Value", f"+{qualified['ev'].max():.1%}" if not qualified.empty else "—")
+    def team_name(code: str, league: str) -> str:
+        return league_names.get(league, {}).get(code, code)
 
     _feed_notes = {
         FIXTURE_SOURCE_LIVE_ODDS: "✓ Live consensus odds from The Odds API",
@@ -347,130 +370,100 @@ else:
         st.session_state.get("fixture_source_used"),
         "ℹ️ Live and free feeds unavailable — showing the bundled sample fixture card",
     )
-    st.caption(f"Scanned {len(predictions)} fixtures on this slate · {feed_note}")
 
-    st.divider()
-    st.subheader("🎯 Matchday Value Picks")
+    # High-level summary row
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Matches Analyzed", f"{len(predictions)} Fixtures")
+    avg_draw_prob = predictions["model_p_draw"].mean()
+    col2.metric("Average Tie Likelihood", f"{avg_draw_prob:.1%}")
+    top_tie = predictions.sort_values("model_p_draw", ascending=False).iloc[0]
+    col3.metric(
+        "Top Tie Candidate",
+        f"{team_name(top_tie['home_team'], top_tie['league'])} vs {team_name(top_tie['away_team'], top_tie['league'])}",
+    )
+    st.caption(feed_note)
 
-    mappings = load_team_mappings()
-    league_names = {lg: build_display_names(lg, mappings) for lg in predictions["league"].unique()}
+    st.write("")
 
-    def team_name(code: str, league: str) -> str:
-        return league_names.get(league, {}).get(code, code)
-
-    # Control panel: bankroll + sort + how many cards, so "Recommended
-    # Stake" below can show a dollar amount, not just an abstract percentage.
-    c_filter1, c_filter2, c_filter3 = st.columns([2, 2, 2])
-    with c_filter1:
-        bankroll = st.number_input("Your Total Bankroll ($)", min_value=50, max_value=100_000, value=1000, step=50)
-    with c_filter2:
-        sort_choice = st.selectbox(
-            "Sort Order", ["Earliest Match First", "Highest Return First", "Highest Model Confidence"],
+    # Control panel: sort + how many cards.
+    c_sort, c_limit = st.columns([2, 1])
+    with c_sort:
+        sort_mode = st.selectbox(
+            "Order Matches By", ["Earliest Kickoff Date", "Highest Tie Likelihood", "Highest Total xG"],
         )
-    with c_filter3:
-        max_cards = st.slider("Matches Displayed", min_value=2, max_value=MAX_CARDS, value=6)
+    with c_limit:
+        card_limit = st.slider("Matches Displayed", min_value=2, max_value=MAX_CARDS, value=6)
 
-    if sort_choice == "Earliest Match First":
-        top_picks = qualified.sort_values("date", ascending=True).head(max_cards)
-    elif sort_choice == "Highest Return First":
-        top_picks = qualified.sort_values("odds_draw", ascending=False).head(max_cards)
+    if sort_mode == "Earliest Kickoff Date":
+        display_df = predictions.sort_values("date", ascending=True)
+    elif sort_mode == "Highest Tie Likelihood":
+        display_df = predictions.sort_values("model_p_draw", ascending=False)
     else:
-        top_picks = qualified.sort_values("ev", ascending=False).head(max_cards)
-
-    if top_picks.empty:
-        st.info(
-            "ℹ️ No fixtures met the +3% EV threshold on this slate. Showing the closest misses "
-            "for context — these fall below the bar and carry **no recommended stake**."
+        display_df = predictions.assign(total_xg=predictions["xg_home"] + predictions["xg_away"]).sort_values(
+            "total_xg", ascending=False
         )
-        closest = predictions.sort_values("ev", ascending=False).head(max_cards)
-        rows = list(closest.iterrows())
-        for i in range(0, len(rows), 2):
-            pair = rows[i:i + 2]
-            cols = st.columns(2)
-            for col, (_, row) in zip(cols, pair):
-                with col, st.container(border=True):
-                    st.markdown('<div class="miss-card-marker"></div>', unsafe_allow_html=True)
+    display_df = display_df.head(card_limit)
 
-                    date_str = pd.to_datetime(row["date"]).strftime("%a, %b %d")
-                    league_full = settings["leagues"].get(row["league"], row["league"])
-                    st.markdown(
-                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                        f"<span style='color:#8b949e; font-size:13px;'>{league_full} • {date_str}</span>"
-                        f"<span class='value-badge badge-below-threshold'>BELOW THRESHOLD</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+    rows = list(display_df.iterrows())
+    for i in range(0, len(rows), 2):
+        pair = rows[i:i + 2]
+        cols = st.columns(2)
+        for col, (_, match) in zip(cols, pair):
+            with col, st.container(border=True):
+                is_high_tie = match["model_p_draw"] >= HIGH_TIE_P_DRAW
+                tie_badge_class = "badge-draw-high" if is_high_tie else "badge-draw-med"
+                tie_badge_label = "HIGH TIE POTENTIAL" if is_high_tie else "MODERATE TIE CHANCE"
+                ev_badge = (
+                    "<span class='badge-ev-play' style='margin-left:6px;'>✓ +EV PLAY</span>"
+                    if match["qualified"] else ""
+                )
 
-                    home = team_name(row["home_team"], row["league"])
-                    away = team_name(row["away_team"], row["league"])
-                    st.markdown(
-                        f"<h3 style='margin:0 0 12px 0; font-size:1.25rem; color:#94a3b8;'>{home} "
-                        f"<span style='color:#64748b;'>vs</span> {away}</h3>",
-                        unsafe_allow_html=True,
-                    )
+                date_str = pd.to_datetime(match["date"]).strftime("%a, %b %d")
+                league_full = settings["leagues"].get(match["league"], match["league"])
+                st.markdown(
+                    f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
+                    f"<span class='league-pill'>{league_full} • {date_str}</span>"
+                    f"<span><span class='{tie_badge_class}'>{tie_badge_label}</span>{ev_badge}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
 
-                    m1, m2 = st.columns(2)
-                    m1.metric("Odds Multiplier", f"{row['odds_draw']:.2f}x")
-                    m2.metric("Model Edge", f"{row['ev']:+.1%}")
-                    st.caption("No stake recommended — doesn't clear the +3% EV bar.")
-    else:
-        rows = list(top_picks.iterrows())
-        for i in range(0, len(rows), 2):
-            pair = rows[i:i + 2]
-            cols = st.columns(2)
-            for col, (_, row) in zip(cols, pair):
-                with col, st.container(border=True):
-                    st.markdown('<div class="match-card-marker"></div>', unsafe_allow_html=True)
+                home = team_name(match["home_team"], match["league"])
+                away = team_name(match["away_team"], match["league"])
+                st.markdown(
+                    f"<h3 style='margin:8px 0 2px 0;'>{home} "
+                    f"<span style='color:#64748b; font-weight:400;'>vs</span> {away}</h3>",
+                    unsafe_allow_html=True,
+                )
 
-                    badge_class, badge_text = value_rating(row["ev"])
-                    date_str = pd.to_datetime(row["date"]).strftime("%a, %b %d")
-                    league_full = settings["leagues"].get(row["league"], row["league"])
-                    st.markdown(
-                        f"<div style='display:flex; justify-content:space-between; align-items:center;'>"
-                        f"<span style='color:#8b949e; font-size:13px;'>{league_full} • {date_str}</span>"
-                        f"<span class='value-badge {badge_class}'>{badge_text}</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                st.markdown(
+                    f"""
+                        <div class="score-box">
+                            <div style="font-size:0.72rem; text-transform:uppercase; color:#38bdf8; font-weight:700; letter-spacing:0.05em;">Most Likely Final Score</div>
+                            <div class="score-primary">{match['top_score']}</div>
+                            <div class="score-runnerup">Alternative: <strong>{match['alt_score']}</strong> ({match['alt_score_prob']:.0%} chance)</div>
+                        </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-                    home = team_name(row["home_team"], row["league"])
-                    away = team_name(row["away_team"], row["league"])
-                    st.markdown(
-                        f"<h3 style='margin:0 0 12px 0; font-size:1.25rem;'>{home} "
-                        f"<span style='color:#64748b;'>vs</span> {away}</h3>",
-                        unsafe_allow_html=True,
-                    )
+                g1, g2, g3 = st.columns(3)
+                g1.metric("Home xG", f"{match['xg_home']:.2f}")
+                g2.metric("Draw Chance", f"{match['model_p_draw']:.1%}")
+                g3.metric("Away xG", f"{match['xg_away']:.2f}")
 
-                    # odds_draw is decimal odds — the return multiplier per $1
-                    # staked (Total Return = Stake x odds_draw), not a fixed
-                    # payout tied to any particular stake size.
-                    odds = float(row["odds_draw"])
-                    stake_pct = float(row["stake_pct"])  # already a bankroll fraction, e.g. 0.025 = 2.5%
-                    stake_dollars = round(bankroll * stake_pct, 2)
-                    total_return = round(stake_dollars * odds, 2)
-                    profit = round(total_return - stake_dollars, 2)
+                p_h = round(match["model_p_home"] * 100)
+                p_d = round(match["model_p_draw"] * 100)
+                p_a = round(match["model_p_away"] * 100)
+                st.caption(f"Forecast: **{home}** {p_h}% | **Draw** {p_d}% | **{away}** {p_a}%")
+                st.progress(min(max(p_h / 100.0, 0.0), 1.0))
 
-                    m1, m2 = st.columns(2)
-                    m1.metric("Odds Multiplier", f"{odds:.2f}x")
-                    m2.metric(
-                        "Recommended Stake", f"${stake_dollars:,.0f}",
-                        help=f"{stake_pct:.1%} of your ${bankroll:,.0f} bankroll",
-                    )
-
-                    st.markdown(
-                        f"<div class='payout-box'>💰 Stake <strong>${stake_dollars:,.2f}</strong> to win "
-                        f"<strong>${total_return:,.2f}</strong> "
-                        f"<span style='color:#10b981; font-weight:600;'>(+${profit:,.2f} profit)</span></div>",
-                        unsafe_allow_html=True,
-                    )
-
-                    with st.expander("Technical model breakdown"):
+                if match["qualified"]:
+                    with st.expander("Betting value analysis"):
                         st.caption(
-                            f"Estimated draw probability: {row['model_p_draw']:.1%} | "
-                            f"Market implied: {row['market_p_draw']:.1%}"
-                        )
-                        st.caption(
-                            f"Projected xG: {home} ({row['xg_home']:.2f}) vs {away} ({row['xg_away']:.2f})"
+                            f"Model draw probability {match['model_p_draw']:.1%} vs. market "
+                            f"{match['market_p_draw']:.1%} → **{match['ev']:+.1%} EV**, "
+                            f"{match['stake_pct']:.1%} of bankroll recommended (Fractional Kelly, capped)."
                         )
 
     with st.expander(f"Show full fixture list ({len(predictions)} scanned, including non-qualified)"):

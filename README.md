@@ -40,18 +40,22 @@ pytest
 
 A four-page Streamlit app:
 
-- **Matchday** (`app.py`) — pick historical data sources (offline demo
-  generator, or football-data.co.uk + Understat to blend, or a CSV
-  upload), run the pipeline, and see fixtures ranked by EV with xG,
-  model vs. market draw probability, and Kelly stake, qualified bets
-  highlighted. Upcoming fixtures are fetched automatically through a
-  three-tier chain, with no source to pick: live consensus odds from
-  The Odds API if a key is set, then the free weekly football-data.co.uk
-  fixture sheet (no key needed), then a bundled sample fixture card as a
-  last resort. If nothing on the slate clears the +3% EV bar, the
-  closest misses are still shown — visually distinct (dashed border,
-  "BELOW THRESHOLD" badge, no stake/payout box) so they read as context,
-  never as a recommendation.
+- **Matchday** (`app.py`) — a Score Predictor view: every analyzed
+  fixture gets a card with its most-likely final score, runner-up
+  score, xG, and a home/draw/away probability bar, all extracted from
+  the real fitted 10x10 scoreline matrix (`src/models/simulator.py:
+  top_scorelines`) — not a random or simulated number. A "HIGH/MODERATE
+  TIE POTENTIAL" badge flags draw-likely fixtures, and a "✓ +EV PLAY"
+  badge (with a "Betting value analysis" expander showing EV and
+  recommended stake) marks fixtures that also clear the PID's +3% EV
+  qualification bar — the draw-value logic still runs underneath, it's
+  just secondary to the scoreline-first presentation. Pick historical
+  data sources (offline demo generator, or football-data.co.uk +
+  Understat to blend, or a CSV upload) in the sidebar; upcoming fixtures
+  are fetched automatically through a three-tier chain — live consensus
+  odds from The Odds API if a key is set, then the free weekly
+  football-data.co.uk fixture sheet (no key needed), then a bundled
+  sample fixture card as a last resort.
 - **Model Diagnostics** (`pages/1_Model_Diagnostics.py`) — fitted
   hyperparameters (μ₀, γ, ρ), convergence/fallback status, and per-team
   attack/defense ratings with charts.

@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from src.models.dixon_coles import DixonColesModel, tau
-from src.models.simulator import build_score_matrix
+from src.models.simulator import build_score_matrix, top_scorelines
 
 
 def generate_synthetic_matches(n_teams: int = 10, rounds: int = 6, seed: int = 42) -> pd.DataFrame:
@@ -65,6 +65,38 @@ class TestScoreMatrix:
         assert tau(np.array([0.0]), np.array([0.0]), lam, mu, rho)[0] == pytest.approx(1 - lam[0] * mu[0] * rho)
         assert tau(np.array([1.0]), np.array([1.0]), lam, mu, rho)[0] == pytest.approx(1 - rho)
         assert tau(np.array([2.0]), np.array([2.0]), lam, mu, rho)[0] == pytest.approx(1.0)
+
+
+class TestTopScorelines:
+    def test_returns_highest_probability_cells_in_order(self):
+        matrix = np.zeros((10, 10))
+        matrix[1, 1] = 0.20
+        matrix[2, 1] = 0.15
+        matrix[0, 0] = 0.10
+        matrix[3, 3] = 0.01
+        # remaining mass spread thinly so it never outranks the above
+        remaining = 1.0 - matrix.sum()
+        matrix[5, 5] = remaining
+
+        top = top_scorelines(matrix, n=3)
+
+        assert top[0] == (5, 5, pytest.approx(remaining))
+        assert top[1] == (1, 1, pytest.approx(0.20))
+        assert top[2] == (2, 1, pytest.approx(0.15))
+
+    def test_n_controls_result_length(self):
+        matrix = build_score_matrix(1.4, 1.1, -0.05)
+        assert len(top_scorelines(matrix, n=1)) == 1
+        assert len(top_scorelines(matrix, n=5)) == 5
+
+    def test_matches_realistic_fit_favors_low_scorelines(self):
+        # A realistic-ish low-scoring matchup should have its most likely
+        # scoreline somewhere in the low-goal region, not a wild outlier.
+        matrix = build_score_matrix(1.3, 1.0, -0.05)
+        top = top_scorelines(matrix, n=1)
+        h, a, p = top[0]
+        assert h <= 3 and a <= 3
+        assert p > 0
 
 
 class TestDixonColesFit:
