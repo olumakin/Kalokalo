@@ -117,6 +117,40 @@ chances. The Matchday sidebar's "Blend online sources" option
   against it meaningless on a tool whose job is finding real
   mispricings, not just approximately wrong in a way that looks fine.
 
+## Season-aware odds selection & strict validation (WP1)
+
+football-data.co.uk's odds columns aren't consistent across its
+archive: the market-consensus column was renamed from `BbAvH/D/A`
+(Betbrain) to `AvgH/D/A` partway through, Pinnacle columns only appear
+in later seasons, and older seasons may carry only Bet365. The
+previous loader hardcoded a single `AvgH/D/A` → `B365H/D/A` fallback,
+which silently starved the model of prices for any season that had
+neither.
+
+`src/ingestion/data_loader.py` replaces this with a season-aware
+hierarchy (`select_match_odds`, used inside `normalize_dataframe`):
+market average → legacy Betbrain average → Pinnacle closing → Pinnacle
+→ Bet365 → market maximum → legacy Betbrain maximum, in that trust
+order (a multi-book average is the least single-book-biased signal;
+market *maximum* is kept only as a last resort since it systematically
+overstates the fair price). Every row picks whichever tier it actually
+has data for; the tier used is recorded in a new `price_source` column
+for auditability, mirroring the `price_source` field already tracked
+per-prediction in the Supabase ledger.
+
+A separate `validate_matches` step runs after normalization (wired
+into `src.pipeline.load_historical_matches`, `src.ingestion.sources
+.load_and_blend_sources`, and the Matchday CSV-upload path) and drops
+rows that would corrupt the Dixon-Coles fit — missing/invalid date,
+team, or goal data, a fixture with identical home/away teams, or an
+exact duplicate. An implausible single-row odds triple (≤1.01, not a
+valid decimal price) is nulled out rather than dropping the match
+itself — a match without a usable price is still valid goal-model
+training data; `src/validation/backtest.py` already skips NaN-odds
+rows when scoring market comparisons. Every caller logs (or, for the
+CSV upload, surfaces in the UI) a report of how many rows were kept vs.
+dropped and why.
+
 **Not implemented** (real extension points, not fake stubs): **Betfair
 Exchange** — its API-NG requires certificate-based login and a
 registered application key this project has no credentials for; and
@@ -174,7 +208,8 @@ ledgers' write status and failure counts after each run.
 config/          Hyperparameters and canonical team-name mappings
 data/            Cached historical results, fixture cards, prediction ledger
 src/ingestion/   Historical/fixture/odds ingestion, team normalization, offline demo data,
-                 Understat xG scraper, multi-source blending
+                 Understat xG scraper, multi-source blending, season-aware odds hierarchy
+                 + strict validation (data_loader.py)
 src/models/      Dixon-Coles fitting engine and 10x10 scoreline simulator
 src/analytics/   De-vigging (multiplicative / Shin) and EV / Kelly sizing
 src/validation/  Strict walk-forward backtest and evaluation metrics
@@ -236,11 +271,13 @@ Phases 1-5 of the PID are implemented as a working MVP:
 Also implemented: multi-source historical blending (football-data.co.uk +
 Understat xG), a live odds-provider integration (The Odds API,
 multi-bookmaker consensus — see "Multi-source data blending" above),
-and PID Phase 0 (compliance UI + additive Supabase durable ledger — see
-"Compliance & durable ledger" above).
+PID Phase 0 (compliance UI + additive Supabase durable ledger — see
+"Compliance & durable ledger" above), and WP1 (season-aware odds
+hierarchy + strict validation — see that section above).
 
 Not yet wired: the `xi` decay grid search itself, which is exposed as a
 config surface (`model.xi_grid` in `config/settings.yaml`) for the
 validation harness to sweep; Betfair Exchange / FBref as additional
-sources (see caveats above); and WP1/WP2 (data loader and Dixon-Coles
-model rewrites), deferred pending confirmation to proceed after Phase 0.
+sources (see caveats above); and WP2 (Dixon-Coles model corrections —
+N-1 reparameterization, per-season gamma, smooth shrinkage, profiled
+rho, scipy-only), not yet started.

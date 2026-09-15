@@ -19,6 +19,7 @@ import yaml
 
 from src.analytics.devig import devig
 from src.analytics.edge import apply_risk_caps, calculate_ev, kelly_fraction, qualifies
+from src.ingestion.data_loader import validate_matches
 from src.ingestion.historical import load_all, load_settings, season_codes
 from src.ingestion.normalizer import normalize_dataframe
 from src.ingestion.odds_feed import load_fixture_csv
@@ -96,7 +97,14 @@ def load_historical_matches(leagues: list[str], seasons_back: int, settings: dic
     seasons = season_codes(end_year - seasons_back, end_year)
     logger.info("Ingesting historical data for %s / seasons %s", leagues, seasons)
     raw = load_all(leagues, seasons, cache_dir=settings["data_source"]["cache_dir"])
-    return normalize_dataframe(raw)
+    matches, report = validate_matches(normalize_dataframe(raw))
+    logger.info(
+        "Historical validation: %d/%d rows kept (dropped %d invalid core, %d same-team, %d duplicate; "
+        "%d implausible odds cleared, %d rows with a usable market price)",
+        report["output_rows"], report["input_rows"], report["dropped_missing_core"],
+        report["dropped_same_team"], report["dropped_duplicate"], report["odds_invalidated"], report["odds_coverage"],
+    )
+    return matches
 
 
 def fit_model(

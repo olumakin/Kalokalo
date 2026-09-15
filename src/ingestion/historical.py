@@ -19,11 +19,19 @@ logger = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SETTINGS_PATH = REPO_ROOT / "config" / "settings.yaml"
 
-# Columns we care about from the raw football-data.co.uk schema.
+# Columns we care about from the raw football-data.co.uk schema. The
+# odds columns cover every tier in src.ingestion.data_loader.ODDS_HIERARCHY
+# — different seasons only populate a subset of these (see that module's
+# docstring), so all of them are kept here rather than just one pair.
 RAW_COLUMNS = [
     "Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR",
-    "B365H", "B365D", "B365A",
     "AvgH", "AvgD", "AvgA",
+    "BbAvH", "BbAvD", "BbAvA",
+    "PSCH", "PSCD", "PSCA",
+    "PSH", "PSD", "PSA",
+    "B365H", "B365D", "B365A",
+    "MaxH", "MaxD", "MaxA",
+    "BbMxH", "BbMxD", "BbMxA",
 ]
 
 

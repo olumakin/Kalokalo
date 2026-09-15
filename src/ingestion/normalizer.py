@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.ingestion.data_loader import select_match_odds
+
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +24,7 @@ TEAM_MAPPINGS_PATH = REPO_ROOT / "config" / "team_mappings.json"
 CANONICAL_COLUMNS = [
     "date", "league", "season", "home_team", "away_team",
     "home_goals", "away_goals", "result",
-    "odds_home", "odds_draw", "odds_away",
+    "odds_home", "odds_draw", "odds_away", "price_source",
 ]
 
 
@@ -76,8 +78,11 @@ def resolve_display_name(code: str, league: str, mappings: dict | None = None) -
 def normalize_dataframe(raw: pd.DataFrame, mappings: dict | None = None) -> pd.DataFrame:
     """Convert raw football-data.co.uk rows into the canonical schema.
 
-    Uses average closing odds (AvgH/D/A) when available, falling back to
-    Bet365 odds (B365H/D/A) otherwise.
+    Market odds are picked per row via a season-aware hierarchy (see
+    src.ingestion.data_loader.select_match_odds / ODDS_HIERARCHY): the
+    "best" available column family a given season/row actually
+    populates wins, rather than one hardcoded pair — a `price_source`
+    column records which tier was used, or NA if none was available.
     """
     if raw.empty:
         return pd.DataFrame(columns=CANONICAL_COLUMNS)
@@ -87,6 +92,12 @@ def normalize_dataframe(raw: pd.DataFrame, mappings: dict | None = None) -> pd.D
 
     df["date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
     df = df.dropna(subset=["date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
+    if df.empty:
+        # dropna above can consume every row (e.g. an all-unparseable
+        # Date column); df.apply(..., result_type="expand") on a 0-row
+        # frame returns 0 columns, which breaks the fixed-width odds
+        # unpacking below — short-circuit instead.
+        return pd.DataFrame(columns=CANONICAL_COLUMNS)
 
     df["home_team"] = df.apply(lambda r: resolve_team(r["HomeTeam"], r["league"], mappings), axis=1)
     df["away_team"] = df.apply(lambda r: resolve_team(r["AwayTeam"], r["league"], mappings), axis=1)
@@ -98,17 +109,9 @@ def normalize_dataframe(raw: pd.DataFrame, mappings: dict | None = None) -> pd.D
         axis=1,
     )
 
-    for target, primary, secondary in (
-        ("odds_home", "AvgH", "B365H"),
-        ("odds_draw", "AvgD", "B365D"),
-        ("odds_away", "AvgA", "B365A"),
-    ):
-        if primary in df.columns:
-            df[target] = df[primary].fillna(df[secondary]) if secondary in df.columns else df[primary]
-        elif secondary in df.columns:
-            df[target] = df[secondary]
-        else:
-            df[target] = pd.NA
+    odds = df.apply(select_match_odds, axis=1, result_type="expand")
+    odds.columns = ["odds_home", "odds_draw", "odds_away", "price_source"]
+    df[["odds_home", "odds_draw", "odds_away", "price_source"]] = odds
 
     out = df[CANONICAL_COLUMNS].sort_values("date").reset_index(drop=True)
     return out

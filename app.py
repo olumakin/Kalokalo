@@ -16,6 +16,7 @@ import uuid
 import pandas as pd
 import streamlit as st
 
+from src.ingestion.data_loader import validate_matches
 from src.ingestion.demo_data import generate_demo_matches
 from src.ingestion.historical import load_settings
 from src.ingestion.normalizer import build_display_names, load_team_mappings, normalize_dataframe
@@ -298,6 +299,13 @@ if run_clicked:
             raw = pd.read_csv(uploaded_history)
             matches = raw if set(["home_goals", "away_goals"]).issubset(raw.columns) else normalize_dataframe(raw)
             matches["date"] = pd.to_datetime(matches["date"])
+            matches, upload_report = validate_matches(matches)
+            if upload_report["dropped_missing_core"] or upload_report["dropped_same_team"] or upload_report["dropped_duplicate"]:
+                st.warning(
+                    f"Upload validation: kept {upload_report['output_rows']}/{upload_report['input_rows']} rows "
+                    f"(dropped {upload_report['dropped_missing_core']} with missing/invalid core fields, "
+                    f"{upload_report['dropped_same_team']} same-team, {upload_report['dropped_duplicate']} duplicate)."
+                )
         else:
             if not selected_sources:
                 st.error("Select at least one data source, or use Upload Custom CSV.")

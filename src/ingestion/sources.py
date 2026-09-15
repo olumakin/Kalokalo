@@ -33,6 +33,7 @@ from datetime import date
 
 import pandas as pd
 
+from src.ingestion.data_loader import validate_matches
 from src.ingestion.historical import load_all, season_codes
 from src.ingestion.normalizer import CANONICAL_COLUMNS, load_team_mappings, normalize_dataframe, resolve_team
 from src.ingestion.understat_xg import fetch_league_season_xg
@@ -112,8 +113,12 @@ def load_and_blend_sources(
     seasons = season_codes(date.today().year - seasons_back, date.today().year)
     raw = load_all(leagues, seasons, cache_dir=settings["data_source"]["cache_dir"])
     base = normalize_dataframe(raw, mappings)
-
     if base.empty:
+        return pd.DataFrame(columns=CANONICAL_COLUMNS)
+
+    base, validation_report = validate_matches(base)
+    if base.empty:
+        logger.warning("All %d loaded matches failed validation: %s", validation_report["input_rows"], validation_report)
         return pd.DataFrame(columns=CANONICAL_COLUMNS)
 
     how = "inner" if blend_mode == BLEND_STRICT else "left"
