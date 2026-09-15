@@ -45,11 +45,12 @@ A four-page Streamlit app:
   score, xG, and a home/draw/away probability bar, all extracted from
   the real fitted 10x10 scoreline matrix (`src/models/simulator.py:
   top_scorelines`) — not a random or simulated number. A "HIGH/MODERATE
-  TIE POTENTIAL" badge flags draw-likely fixtures, and a "✓ +EV PLAY"
-  badge (with a "Betting value analysis" expander showing EV and
-  recommended stake) marks fixtures that also clear the PID's +3% EV
-  qualification bar — the draw-value logic still runs underneath, it's
-  just secondary to the scoreline-first presentation. Pick historical
+  TIE POTENTIAL" badge flags draw-likely fixtures, alongside a neutral
+  "FORECAST ONLY" badge — stake/payout language and the EV qualification
+  badge are deliberately kept off this primary card view (see
+  "Compliance & durable ledger" below); the underlying +3% EV
+  qualification logic still runs and is recorded to both ledgers, it's
+  just not surfaced here. Pick historical
   data sources (offline demo generator, or football-data.co.uk +
   Understat to blend, or a CSV upload) in the sidebar; upcoming fixtures
   are fetched automatically through a three-tier chain — live consensus
@@ -126,6 +127,47 @@ can change without notice — failures degrade to an empty result with a
 logged warning rather than breaking the pipeline, but nothing here was
 verified against a live pull (this sandbox has no outbound access).
 
+## Compliance & durable ledger
+
+**UI compliance.** Every page shows a "NOT FINANCIAL ADVICE" banner with
+a Responsible Gambling link (`RG_URL` env var / secret, defaults to
+BeGambleAware) — the sidebar carries the same notice. The Matchday
+cards intentionally omit stake/payout figures and the "+EV PLAY" badge;
+that computation still runs in `build_predictions` and is written to
+both ledgers below, it's just not displayed on the primary card.
+
+**Local ledger** (`src/tracking/ledger.py`) is unchanged — an
+append-only Parquet/CSV file under `data/`, read by the Ledger page.
+It's ephemeral on hosts without a persistent disk (e.g. a fresh
+Streamlit Cloud container), which is why the Supabase ledger below
+exists as a durable, additive companion, not a replacement.
+
+**Supabase remote ledger** (`src/tracking/supabase_ledger.py`) writes
+every prediction to a managed Postgres table outside the app's own
+container, gated by Row Level Security to INSERT + SELECT only on the
+anon/publishable key — there is no UPDATE or DELETE policy, so a
+prediction can't be edited after the fact. Settling a fixture is a
+separate append-only insert into `settlements`, never a mutation of its
+`predictions` row. To enable it:
+
+1. Create a Supabase project, then run `supabase/schema.sql` once in
+   its SQL Editor (Project → SQL Editor → New query) — this module only
+   holds the anon key, which has no DDL access to create the tables
+   itself.
+2. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` (the `sb_publishable_...`
+   key from Project Settings → API) via environment variables or
+   `.streamlit/secrets.toml` (gitignored — never commit this file).
+
+Requires `supabase==2.31.0`, pinned in `requirements.txt`: the older
+`2.3.0` release validates API keys locally against a hardcoded
+JWT-shaped regex and rejects the newer `sb_publishable_`/`sb_secret_`
+key format before ever making a network call.
+
+If Supabase isn't configured, `get_supabase_client()` returns `None`
+and the app runs exactly as before — the write is skipped, not
+retried or errored. A sidebar "System Health" panel reports both
+ledgers' write status and failure counts after each run.
+
 ## Project layout
 
 ```
@@ -136,7 +178,8 @@ src/ingestion/   Historical/fixture/odds ingestion, team normalization, offline 
 src/models/      Dixon-Coles fitting engine and 10x10 scoreline simulator
 src/analytics/   De-vigging (multiplicative / Shin) and EV / Kelly sizing
 src/validation/  Strict walk-forward backtest and evaluation metrics
-src/tracking/    Append-only prediction ledger
+src/tracking/    Append-only local prediction ledger + additive Supabase remote ledger
+supabase/        schema.sql — run once in the Supabase SQL editor to enable the remote ledger
 src/pipeline.py  End-to-end CLI entry point + shared logic for the UI
 app.py           Streamlit dashboard — Matchday (home) page
 pages/           Streamlit dashboard — Model Diagnostics, Backtest, Ledger pages
@@ -191,10 +234,13 @@ Phases 1-5 of the PID are implemented as a working MVP:
 - [x] Persistent prediction ledger + Streamlit matchday dashboard
 
 Also implemented: multi-source historical blending (football-data.co.uk +
-Understat xG) and a live odds-provider integration (The Odds API,
-multi-bookmaker consensus) — see "Multi-source data blending" above.
+Understat xG), a live odds-provider integration (The Odds API,
+multi-bookmaker consensus — see "Multi-source data blending" above),
+and PID Phase 0 (compliance UI + additive Supabase durable ledger — see
+"Compliance & durable ledger" above).
 
 Not yet wired: the `xi` decay grid search itself, which is exposed as a
 config surface (`model.xi_grid` in `config/settings.yaml`) for the
-validation harness to sweep; and Betfair Exchange / FBref as additional
-sources (see caveats above).
+validation harness to sweep; Betfair Exchange / FBref as additional
+sources (see caveats above); and WP1/WP2 (data loader and Dixon-Coles
+model rewrites), deferred pending confirmation to proceed after Phase 0.
