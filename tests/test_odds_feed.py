@@ -2,6 +2,7 @@ from unittest.mock import Mock
 
 import pandas as pd
 import pytest
+import requests
 
 import src.ingestion.odds_feed as odds_feed_mod
 from src.ingestion.odds_feed import (
@@ -53,7 +54,7 @@ def _session_returning(payload):
 class TestFetchLiveOdds:
     def test_averages_across_all_bookmakers(self):
         session = _session_returning([SAMPLE_EVENT])
-        df = fetch_live_odds("E0", api_key="test-key", session=session)
+        df = fetch_live_odds("E0", api_key="test-key-1234567890abcdef", session=session)
 
         assert len(df) == 1
         row = df.iloc[0]
@@ -67,20 +68,42 @@ class TestFetchLiveOdds:
         df = fetch_live_odds("E0")
         assert df.empty
 
+    def test_malformed_short_key_skips_the_request_entirely(self):
+        session = Mock()
+        df = fetch_live_odds("E0", api_key="short", session=session)
+        assert df.empty
+        session.get.assert_not_called()  # never wastes a round trip on an obviously-bad key
+
     def test_unmapped_league_returns_empty(self):
-        df = fetch_live_odds("XX", api_key="test-key")
+        df = fetch_live_odds("XX", api_key="test-key-1234567890abcdef")
         assert df.empty
 
     def test_event_with_no_h2h_market_is_skipped(self):
         event = dict(SAMPLE_EVENT, bookmakers=[SAMPLE_EVENT["bookmakers"][2]])  # only the odds-less book
         session = _session_returning([event])
-        df = fetch_live_odds("E0", api_key="test-key", session=session)
+        df = fetch_live_odds("E0", api_key="test-key-1234567890abcdef", session=session)
         assert df.empty
 
     def test_network_failure_returns_empty_not_raise(self):
         session = Mock()
         session.get.side_effect = ConnectionError("blocked")
-        df = fetch_live_odds("E0", api_key="test-key", session=session)
+        df = fetch_live_odds("E0", api_key="test-key-1234567890abcdef", session=session)
+        assert df.empty
+
+    def test_invalid_key_401_returns_empty_not_raise(self):
+        session = Mock()
+        resp = Mock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("401 Unauthorized")
+        session.get.return_value = resp
+        df = fetch_live_odds("E0", api_key="bad-key-but-long-enough-1234", session=session)
+        assert df.empty
+
+    def test_rate_limited_429_returns_empty_not_raise(self):
+        session = Mock()
+        resp = Mock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("429 Too Many Requests")
+        session.get.return_value = resp
+        df = fetch_live_odds("E0", api_key="test-key-1234567890abcdef", session=session)
         assert df.empty
 
 
@@ -157,7 +180,7 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", lambda league, api_key=None: live_df)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
 
-        result, source = get_upcoming_fixtures(["E0"], api_key="test-key", fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
 
         assert source == FIXTURE_SOURCE_LIVE_ODDS
         assert len(result) == 1
@@ -183,7 +206,7 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", _empty_frames)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", lambda leagues, **k: free_df)
 
-        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key", fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
 
         assert source == FIXTURE_SOURCE_FREE_SCHEDULE
         assert len(result) == 1
@@ -192,10 +215,27 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", _empty_frames)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
 
-        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key", fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
 
         assert source == FIXTURE_SOURCE_SAMPLE_CARD
         assert len(result) == 1  # from the fallback CSV, not an empty frame
+        assert result.iloc[0]["home_team"] == "ARS"
+
+    def test_invalid_key_falls_through_the_full_chain_end_to_end(self, monkeypatch, fallback_csv):
+        """An invalid/rate-limited key (or a totally unreachable network,
+        e.g. this sandbox) must never surface as an error to the caller —
+        it should silently fall through live -> free -> sample card. Exercises
+        the real fetch_live_odds/fetch_free_schedule HTTP-error handling
+        (not mocked away), only the transport (requests.get) is faked."""
+        resp = Mock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError("401 Unauthorized")
+        fake_get = Mock(return_value=resp)
+        monkeypatch.setattr(odds_feed_mod.requests, "get", fake_get)
+
+        result, source = get_upcoming_fixtures(["E0"], api_key="invalid-key", fallback_path=fallback_csv)
+
+        assert source == FIXTURE_SOURCE_SAMPLE_CARD
+        assert len(result) == 1
         assert result.iloc[0]["home_team"] == "ARS"
 
     def test_queries_every_requested_league(self, monkeypatch, fallback_csv):
@@ -207,5 +247,5 @@ class TestGetUpcomingFixtures:
 
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", fake_fetch)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
-        get_upcoming_fixtures(["E0", "SP1", "I1"], api_key="test-key", fallback_path=fallback_csv)
+        get_upcoming_fixtures(["E0", "SP1", "I1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
         assert calls == ["E0", "SP1", "I1"]

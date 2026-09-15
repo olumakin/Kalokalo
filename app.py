@@ -248,13 +248,16 @@ with st.sidebar:
     st.caption("Upcoming fixtures are fetched automatically — no source to pick.")
     odds_api_key = _resolve_odds_api_key()
     if odds_api_key:
-        st.success("✓ Live Odds API Connected")
+        st.success("🟢 Live Odds API configured")
     else:
         odds_api_key = st.text_input(
-            "Odds API Key", type="password", key="odds_api_key_input",
+            "Odds API Key (optional)", type="password", key="odds_api_key_input",
             help="Enter your API key, or set ODDS_API_KEY in your environment or Streamlit secrets. "
-                 "Free tier: 500 requests/month, live odds only (no historical endpoint). Left blank, "
-                 "or if the live feed is unreachable, falls back to the bundled sample fixture card.",
+                 "Free tier: 500 requests/month, live odds only (no historical endpoint).",
+        )
+        st.caption(
+            "🔵 Default mode: free football-data.co.uk feed active. If the key is missing, "
+            "invalid, or rate-limited, this is used automatically — no error, no blank screen."
         )
 
     st.header("3. Run")
@@ -363,12 +366,21 @@ else:
         return league_names.get(league, {}).get(code, code)
 
     _feed_notes = {
-        FIXTURE_SOURCE_LIVE_ODDS: "✓ Live consensus odds from The Odds API",
-        FIXTURE_SOURCE_FREE_SCHEDULE: "✓ Free weekly schedule from football-data.co.uk",
+        FIXTURE_SOURCE_LIVE_ODDS: "Live Odds API (Consensus)",
+        FIXTURE_SOURCE_FREE_SCHEDULE: "football-data.co.uk (Free)",
     }
-    feed_note = _feed_notes.get(
-        st.session_state.get("fixture_source_used"),
-        "ℹ️ Live and free feeds unavailable — showing the bundled sample fixture card",
+    feed_label = _feed_notes.get(st.session_state.get("fixture_source_used"), "Bundled sample fixture card")
+
+    st.markdown(
+        f"""
+            <div style="display:flex; justify-content:flex-end; margin-bottom:10px;">
+                <span style="background:#1e293b; color:#38bdf8; border:1px solid #334155;
+                             padding:4px 12px; border-radius:9999px; font-size:12px; font-weight:600;">
+                    Feed: {feed_label}
+                </span>
+            </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     # High-level summary row
@@ -381,7 +393,6 @@ else:
         "Top Tie Candidate",
         f"{team_name(top_tie['home_team'], top_tie['league'])} vs {team_name(top_tie['away_team'], top_tie['league'])}",
     )
-    st.caption(feed_note)
 
     st.write("")
 

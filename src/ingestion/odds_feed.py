@@ -88,6 +88,12 @@ def fetch_live_odds(
     if not api_key:
         logger.warning("ODDS_API_KEY not set; skipping live odds fetch for %s", league)
         return pd.DataFrame(columns=FIXTURE_COLUMNS)
+    if len(api_key.strip()) <= 10:
+        # Real Odds API keys are 32-char hex strings; anything this short
+        # is obviously not one — skip the round trip rather than let the
+        # server reject it (same graceful-empty-result outcome, cheaper).
+        logger.warning("ODDS_API_KEY looks malformed (too short); skipping live odds fetch for %s", league)
+        return pd.DataFrame(columns=FIXTURE_COLUMNS)
 
     sport_key = ODDS_API_SPORT_KEYS.get(league)
     if sport_key is None:
