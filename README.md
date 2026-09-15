@@ -151,6 +151,43 @@ rows when scoring market comparisons. Every caller logs (or, for the
 CSV upload, surfaces in the UI) a report of how many rows were kept vs.
 dropped and why.
 
+## Dixon-Coles model corrections (WP2)
+
+`src/models/dixon_coles.py` — four corrections to the fitting core,
+kept scipy-only (no JAX/autodiff dependency, by explicit choice):
+
+- **N-1 reparameterization**: one well-observed reference team is
+  pinned at (alpha=0, beta=0) during optimization for identifiability
+  (standard reference-category coding), then every team's published
+  rating is re-centered onto the sum-to-zero basis via a mean shift
+  absorbed into `mu0_` — a pure change of basis that leaves every
+  fitted lambda/mu, and therefore the likelihood, exactly unchanged.
+- **Per-season gamma**: home advantage is fit as one value per season
+  present in the training window (`gamma_by_season_`) instead of a
+  single constant across the whole rolling window — it measurably
+  drifts season to season (e.g. behind-closed-doors matches). `predict`
+  uses the most recently fitted season's value (`gamma_`) as the best
+  available estimate for a fixture in a season not yet played.
+- **Smooth shrinkage**: a team's rating is penalized toward the league
+  mean by a continuous `min_matches / n_matches` ridge weight instead
+  of the old hard cutoff that fully zeroed out anything below
+  `min_matches` and left anything above it untouched — no more
+  discontinuity between a 14-match and a 16-match team.
+  `regularized_teams_` is kept as a diagnostic list of sparse teams,
+  but they now get a real (heavily shrunk, not hardcoded-zero) rating.
+- **Profiled rho**: rho is optimized in an outer 1-D bounded search
+  over the *profile* negative log-likelihood (mu0/gamma/alpha/beta
+  re-optimized at each candidate rho) instead of jointly with every
+  other parameter in one high-dimensional optimization. rho is a weak,
+  narrow-support nuisance parameter (it only touches four low-score
+  cells via the tau adjustment) that destabilizes a joint fit —
+  profiling it out is the standard fix, and what Dixon & Coles (1997)
+  do. This multiplies fit cost by roughly the number of profile
+  evaluations (capped at 15, with a coarse `1e-3` tolerance — rho
+  doesn't reward more precision than that); `src/validation/backtest.py`
+  refits periodically through a walk-forward run, so a full backtest is
+  correspondingly slower than before.
+
 **Not implemented** (real extension points, not fake stubs): **Betfair
 Exchange** — its API-NG requires certificate-based login and a
 registered application key this project has no credentials for; and
@@ -272,12 +309,11 @@ Also implemented: multi-source historical blending (football-data.co.uk +
 Understat xG), a live odds-provider integration (The Odds API,
 multi-bookmaker consensus — see "Multi-source data blending" above),
 PID Phase 0 (compliance UI + additive Supabase durable ledger — see
-"Compliance & durable ledger" above), and WP1 (season-aware odds
-hierarchy + strict validation — see that section above).
+"Compliance & durable ledger" above), WP1 (season-aware odds hierarchy
++ strict validation), and WP2 (Dixon-Coles model corrections — see
+those sections above).
 
 Not yet wired: the `xi` decay grid search itself, which is exposed as a
 config surface (`model.xi_grid` in `config/settings.yaml`) for the
-validation harness to sweep; Betfair Exchange / FBref as additional
-sources (see caveats above); and WP2 (Dixon-Coles model corrections —
-N-1 reparameterization, per-season gamma, smooth shrinkage, profiled
-rho, scipy-only), not yet started.
+validation harness to sweep; and Betfair Exchange / FBref as additional
+sources (see caveats above).
