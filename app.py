@@ -130,23 +130,31 @@ def highlight_qualified(row: pd.Series) -> list[str]:
 
 @st.cache_data(show_spinner=False)
 def _cached_demo_matches(league: str, n_teams: int, rounds: int, seed: int) -> pd.DataFrame:
+    # No ttl: this is a deterministic synthetic generator keyed on `seed`
+    # — the same inputs are *supposed* to always return the same data,
+    # unlike the network-backed caches below, so there's no "staleness"
+    # concept here to expire.
     return generate_demo_matches(league=league, n_teams=n_teams, rounds=rounds, seed=seed)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl="6h")
 def _cached_historical_download(leagues: tuple[str, ...], seasons_back: int, _settings: dict) -> pd.DataFrame:
     return load_historical_matches(list(leagues), seasons_back, _settings)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl="6h")
 def _cached_blend_sources(
     selected_sources: tuple[str, ...], leagues: tuple[str, ...], seasons_back: int, _settings: dict, blend_mode: str,
 ) -> pd.DataFrame:
     return load_and_blend_sources(list(selected_sources), list(leagues), seasons_back, _settings, blend_mode=blend_mode)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl="15m")
 def _cached_upcoming_fixtures(leagues: tuple[str, ...], api_key: str) -> tuple[pd.DataFrame, str]:
+    # Shortest ttl of the four: this is the "2. Live Market Feed" data —
+    # live odds move continuously and even the free-schedule/sample-card
+    # fallback tiers can change day to day (a new weekend's fixtures
+    # posted, a tier becoming reachable that wasn't before).
     return get_upcoming_fixtures(list(leagues), api_key=api_key or None)
 
 
