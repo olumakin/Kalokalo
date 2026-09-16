@@ -166,7 +166,8 @@ class DixonColesModel:
     # -- public API ---------------------------------------------------------
 
     def fit(self, matches: pd.DataFrame, as_of: pd.Timestamp | None = None,
-            xi: float = 0.0065, goal_columns: tuple[str, str] = ("home_goals", "away_goals")) -> "DixonColesModel":
+            xi: float = 0.0065, goal_columns: tuple[str, str] = ("home_goals", "away_goals"),
+            warm_start: dict[str, tuple[float, float]] | None = None) -> "DixonColesModel":
         """Fit the model on matches strictly before `as_of` (or all rows if
         `as_of` is None). `matches` must already be in canonical schema
         (see src.ingestion.normalizer) with a `date` column of Timestamps.
@@ -179,6 +180,17 @@ class DixonColesModel:
         to non-integer x, a documented but approximate technique (xG
         isn't literally Poisson-distributed count data); it is not the
         PID's default and must be opted into explicitly.
+
+        `warm_start`, if given, maps team code -> (alpha, beta) from a
+        prior fit (e.g. last matchweek's `self.alpha_`/`self.beta_`
+        zipped by team), used as the initial guess for the optimizer
+        instead of 0.0 — keyed by team ID rather than positionally, so
+        it stays correct across a season boundary where the team set
+        changes (promotion/relegation): a team absent from `warm_start`
+        (newly promoted, or simply new to this repo's history) starts
+        from (0.0, 0.0) — the same promoted-team prior smooth shrinkage
+        already pulls sparse teams toward, so a missing warm-start entry
+        is never a special case to handle, just the ordinary default.
         """
         goal_col_h, goal_col_a = goal_columns
         df = matches.copy()
@@ -235,6 +247,12 @@ class DixonColesModel:
         x0 = np.zeros(1 + n_seasons + 2 * n)
         x0[0] = mu0_init
         x0[1:1 + n_seasons] = 0.2
+        if warm_start:
+            for t, i in team_index.items():
+                prior = warm_start.get(t)
+                if prior is not None:
+                    x0[1 + n_seasons + i] = prior[0]
+                    x0[1 + n_seasons + n + i] = prior[1]
 
         def fit_at_rho(rho: float):
             bounds = [(None, None)] * len(x0)

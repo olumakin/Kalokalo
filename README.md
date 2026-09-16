@@ -188,6 +188,79 @@ kept scipy-only (no JAX/autodiff dependency, by explicit choice):
   refits periodically through a walk-forward run, so a full backtest is
   correspondingly slower than before.
 
+## Gate evaluation harness (WP3)
+
+`src/validation/{bootstrap,clv,calibration,three_way,gate_harness,
+gate_report}.py` — a rigorous, per-league walk-forward evidence-pack
+harness for the go/no-go gate decision, separate from
+`src/validation/backtest.py` (the existing Streamlit Backtest page's
+simpler single-price/single-xi harness, left untouched so that page
+keeps working).
+
+- **`bootstrap.py`**: seeded percentile bootstrap CIs that resample row
+  *indices* rather than values — works for 1-D or 2-D data, or a
+  DataFrame, unlike `np.random.choice` on raw values (which only
+  accepts 1-D input and crashes on anything ROI-shaped once a league
+  has more than a handful of bets). Includes a block bootstrap
+  (resamples whole matchweeks, since bets in the same round share
+  information and closing-line timing) and a paired bootstrap (for a
+  Diebold-Mariano-style CI on a per-match difference statistic, e.g. a
+  log-loss edge).
+- **`clv.py`**: two-price CLV (`entry_odds/close_odds - 1`) evaluated
+  both as a baseline (every fixture with both prices, regardless of
+  whether the model flagged it) and on flagged bets only — the model
+  only demonstrates value if flagged CLV clears the baseline, not
+  merely zero. Samples of 10 or fewer report `NaN` plus an
+  `insufficient_sample` flag rather than a 0.00% that reads as a real
+  result.
+- **`calibration.py`**: Cox calibration-regression slope/intercept
+  (reliability-by-decile reuses the existing `metrics.calibration_curve`
+  at `n_bins=10` — no need to duplicate it).
+- **`three_way.py`**: full 3-outcome log-loss and RPS (Ranked
+  Probability Score — rewards being *closer* on the ordinal Home <
+  Draw < Away scale when wrong, unlike log-loss/Brier), complementing
+  the existing draw-only `log_loss`/`brier_score` in `metrics.py`.
+- **`gate_harness.py`**: the orchestrator. Per-league ξ (not one
+  constant); team-ID-keyed warm starts across retrains, so a season
+  boundary with promoted/relegated teams doesn't silently misalign
+  parameters (a new team just gets the ordinary (0, 0) prior —
+  `DixonColesModel.fit`'s new `warm_start` argument); exclusion
+  tracking with reason codes (`insufficient_league_history`,
+  `unseen_team`) carrying date/season/league/fixture_id; fits cached to
+  disk keyed by (league, retrain date, ξ, git commit hash) so re-running
+  the report doesn't refit identical work; asserts `date` is already
+  datetime64 (UTC) rather than parsing it — that's the ingestion
+  layer's job (WP1), not the harness's. A two-price entry/close pair
+  comes from `src.ingestion.data_loader.select_entry_close_odds`:
+  Pinnacle's own opening line vs. its own closing line (the standard
+  proxy when true bet-placement timestamps aren't available — comparing
+  one sharp book against itself avoids cross-book bias), falling back
+  to Bet365 for either leg on older seasons; Bet365's draw price is
+  also captured separately (`retail_draw`) for evaluating CLV against a
+  realistic recreational-bettor price.
+- **`gate_report.py`**: `compute_gate_decision` turns per-league CLV
+  bounds into a decision — proceed with leagues clearing a positive
+  lower CLV bound, reposition as a forecasting tool if every league's
+  upper bound is at or below zero, otherwise inconclusive — computed on
+  numeric bounds (never a pre-formatted string), so it stays
+  machine-actionable; `render_gate_report_markdown` formats the result.
+
+**Known gaps, not yet built**: COVID-season (2019/20 run-in, 2020/21)
+flagging in the report — home-advantage estimates spanning those
+matches are overstated and the by-season breakdown (`results["season"]`
+is captured per row, so `groupby(["league","season"])` on the harness's
+own output already supports this breakdown — just no dedicated helper
+or explicit COVID callout yet) would show it, but nothing surfaces it
+automatically today. Cross-league parallelization — `run_gate_evaluation`
+loops leagues sequentially; disk caching means a *repeated* report
+doesn't refit, but a first run over the full corpus is not parallelized
+(deliberately deferred: multiprocessing a `DixonColesModel`/scipy
+optimizer safely on Streamlit Cloud's typically memory-constrained free
+tier is real added complexity for a one-time cost the cache already
+amortizes on every subsequent run). A named "log-loss edge" convenience
+wrapping `bootstrap.paired_bootstrap_ci` — the primitive is built and
+tested, but no default report field calls it yet.
+
 **Not implemented** (real extension points, not fake stubs): **Betfair
 Exchange** — its API-NG requires certificate-based login and a
 registered application key this project has no credentials for; and
@@ -249,7 +322,9 @@ src/ingestion/   Historical/fixture/odds ingestion, team normalization, offline 
                  + strict validation (data_loader.py)
 src/models/      Dixon-Coles fitting engine and 10x10 scoreline simulator
 src/analytics/   De-vigging (multiplicative / Shin) and EV / Kelly sizing
-src/validation/  Strict walk-forward backtest and evaluation metrics
+src/validation/  Strict walk-forward backtest and evaluation metrics, plus the WP3
+                 gate-evaluation harness (bootstrap, CLV, calibration, three-way scoring,
+                 gate_harness.py, gate_report.py)
 src/tracking/    Append-only local prediction ledger + additive Supabase remote ledger
 supabase/        schema.sql — run once in the Supabase SQL editor to enable the remote ledger
 src/pipeline.py  End-to-end CLI entry point + shared logic for the UI
@@ -310,10 +385,14 @@ Understat xG), a live odds-provider integration (The Odds API,
 multi-bookmaker consensus — see "Multi-source data blending" above),
 PID Phase 0 (compliance UI + additive Supabase durable ledger — see
 "Compliance & durable ledger" above), WP1 (season-aware odds hierarchy
-+ strict validation), and WP2 (Dixon-Coles model corrections — see
-those sections above).
++ strict validation), WP2 (Dixon-Coles model corrections), and WP3
+(gate-evaluation harness — see those sections above). Per the WP1/WP2
+evidence-pack gate, WP3 has not yet been run against the full
+historical corpus.
 
 Not yet wired: the `xi` decay grid search itself, which is exposed as a
 config surface (`model.xi_grid` in `config/settings.yaml`) for the
-validation harness to sweep; and Betfair Exchange / FBref as additional
+validation harness to sweep; COVID-season flagging and cross-league
+parallelization in the WP3 harness (see that section's "Known gaps"
+above); and Betfair Exchange / FBref as additional
 sources (see caveats above).

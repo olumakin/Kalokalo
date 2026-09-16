@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.ingestion.data_loader import select_match_odds, validate_matches
+from src.ingestion.data_loader import select_entry_close_odds, select_match_odds, validate_matches
 
 
 class TestSelectMatchOdds:
@@ -45,6 +45,46 @@ class TestSelectMatchOdds:
         row = pd.Series({"B365H": 2.1, "B365D": 3.2, "B365A": 3.7, "MaxH": 2.3, "MaxD": 3.6, "MaxA": 4.0})
         h, d, a, source = select_match_odds(row)
         assert source == "Bet365"
+
+
+class TestSelectEntryCloseOdds:
+    def test_prefers_pinnacle_open_close_pair(self):
+        row = pd.Series({
+            "PSH": 2.05, "PSD": 3.35, "PSA": 3.75,
+            "PSCH": 2.10, "PSCD": 3.25, "PSCA": 3.65,
+            "B365H": 2.0, "B365D": 3.3, "B365A": 3.8,
+        })
+        out = select_entry_close_odds(row)
+        assert (out["entry_home"], out["entry_draw"], out["entry_away"]) == (2.05, 3.35, 3.75)
+        assert out["entry_source"] == "Pinnacle (opening)"
+        assert (out["close_home"], out["close_draw"], out["close_away"]) == (2.10, 3.25, 3.65)
+        assert out["close_source"] == "Pinnacle closing"
+
+    def test_entry_falls_back_to_bet365_when_no_pinnacle(self):
+        row = pd.Series({"B365H": 2.0, "B365D": 3.3, "B365A": 3.8})
+        out = select_entry_close_odds(row)
+        assert (out["entry_home"], out["entry_draw"], out["entry_away"]) == (2.0, 3.3, 3.8)
+        assert out["entry_source"] == "Bet365"
+
+    def test_close_falls_back_to_market_average_when_no_pinnacle_closing(self):
+        row = pd.Series({"AvgH": 2.1, "AvgD": 3.2, "AvgA": 3.7})
+        out = select_entry_close_odds(row)
+        assert out["close_source"] == "market average"
+
+    def test_retail_draw_is_bet365_draw_specifically(self):
+        row = pd.Series({"B365H": 2.0, "B365D": 3.3, "B365A": 3.8})
+        out = select_entry_close_odds(row)
+        assert out["retail_draw"] == pytest.approx(3.3)
+
+    def test_missing_retail_price_is_none(self):
+        row = pd.Series({"PSH": 2.0, "PSD": 3.3, "PSA": 3.8})
+        out = select_entry_close_odds(row)
+        assert out["retail_draw"] is None
+
+    def test_no_available_tier_returns_none_fields(self):
+        row = pd.Series({"HomeTeam": "Arsenal"})
+        out = select_entry_close_odds(row)
+        assert out["entry_home"] is None and out["close_home"] is None and out["retail_draw"] is None
 
 
 class TestValidateMatches:

@@ -285,6 +285,58 @@ class TestDixonColesFit:
         with pytest.raises(ValueError):
             DixonColesModel(min_matches=15).fit(matches, goal_columns=("home_xg", "away_xg"))
 
+    def test_warm_start_seeds_the_optimizer_and_converges(self):
+        matches = generate_synthetic_matches()
+        first = DixonColesModel(min_matches=15, max_iter=1000).fit(matches, xi=0.0065)
+        prior = {t: (first.alpha_[t], first.beta_[t]) for t in first.teams_}
+
+        warm = DixonColesModel(min_matches=15, max_iter=1000).fit(matches, xi=0.0065, warm_start=prior)
+        assert warm.converged_ is True
+        # Refitting the identical data from a warm start should land
+        # close to the same optimum, not some other one.
+        for t in first.teams_:
+            assert warm.alpha_[t] == pytest.approx(first.alpha_[t], abs=0.05)
+
+    def test_warm_start_survives_a_season_boundary_with_team_turnover(self):
+        # Season 1: T00..T09. Season 2: T05..T14 (T00-T04 relegated,
+        # T10-T14 promoted) -- the team set only partially overlaps, the
+        # exact scenario a positional (not team-keyed) warm start breaks.
+        season1 = generate_synthetic_matches(n_teams=10, rounds=6, seed=1)
+        season1["season"] = "2223"
+
+        rng = np.random.default_rng(2)
+        promoted_teams = [f"T{i:02d}" for i in range(5, 15)]
+        rows = []
+        start = season1["date"].max() + pd.Timedelta(days=1)
+        day = 0
+        for _ in range(6):
+            for home in promoted_teams:
+                for away in promoted_teams:
+                    if home == away:
+                        continue
+                    hg, ag = int(rng.poisson(1.4)), int(rng.poisson(1.1))
+                    rows.append({
+                        "date": start + pd.Timedelta(days=day), "league": "E0", "season": "2324",
+                        "home_team": home, "away_team": away, "home_goals": hg, "away_goals": ag,
+                        "result": "H" if hg > ag else ("A" if hg < ag else "D"),
+                        "odds_home": 2.0, "odds_draw": 3.3, "odds_away": 3.8,
+                    })
+                    day += 1
+        season2 = pd.DataFrame(rows)
+
+        model1 = DixonColesModel(min_matches=15, max_iter=1000).fit(season1, xi=0.0065)
+        prior = {t: (model1.alpha_[t], model1.beta_[t]) for t in model1.teams_}
+
+        model2 = DixonColesModel(min_matches=15, max_iter=1000).fit(season2, xi=0.0065, warm_start=prior)
+
+        assert model2.converged_ is True
+        assert set(model2.teams_) == set(promoted_teams)
+        # Newly-promoted teams (no warm-start entry: T10-T14) must not
+        # crash or silently reuse a stale value -- they just get the
+        # ordinary (0.0, 0.0) prior like any team fit without warm_start.
+        for t in ("T10", "T11", "T12", "T13", "T14"):
+            assert abs(model2.alpha_[t]) < 1.0
+
     def test_fit_drops_rows_with_null_goal_column(self):
         matches = generate_synthetic_matches()
         matches["home_xg"] = matches["home_goals"].astype(float)

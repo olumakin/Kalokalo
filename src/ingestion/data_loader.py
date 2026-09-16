@@ -57,6 +57,49 @@ def select_match_odds(row: pd.Series) -> tuple[float | None, float | None, float
     return None, None, None, None
 
 
+def select_entry_close_odds(row: pd.Series) -> dict:
+    """Two genuinely distinct price snapshots for CLV analysis (WP3),
+    as opposed to select_match_odds' single "best available" price.
+
+    football-data.co.uk's historical CSVs don't record a full odds time
+    series, so there's no literal "price when the bet was placed" for a
+    backtest. The standard proxy in the sports-betting research
+    literature when true bet-timestamps aren't available is Pinnacle's
+    own opening line (PS) vs. its own closing line (PSC) — comparing a
+    single sharp book against itself avoids the cross-book bias a
+    Pinnacle-vs-Bet365 comparison would introduce. Falls back to Bet365
+    for either leg where Pinnacle columns aren't populated for that
+    row/season (older seasons, before Pinnacle was tracked).
+
+    retail_draw is Bet365's own draw price specifically — for a
+    separate "retail pass" evaluating CLV against a price a
+    recreational bettor could actually have gotten, alongside the
+    sharp-book comparison.
+    """
+    entry_h = entry_d = entry_a = entry_source = None
+    for prefix, label in (("PS", "Pinnacle (opening)"), ("B365", "Bet365")):
+        h, d, a = row.get(f"{prefix}H"), row.get(f"{prefix}D"), row.get(f"{prefix}A")
+        if pd.notna(h) and pd.notna(d) and pd.notna(a):
+            entry_h, entry_d, entry_a, entry_source = float(h), float(d), float(a), label
+            break
+
+    close_h = close_d = close_a = close_source = None
+    for prefix, label in (("PSC", "Pinnacle closing"), ("Avg", "market average"), ("BbAv", "market average (legacy)")):
+        h, d, a = row.get(f"{prefix}H"), row.get(f"{prefix}D"), row.get(f"{prefix}A")
+        if pd.notna(h) and pd.notna(d) and pd.notna(a):
+            close_h, close_d, close_a, close_source = float(h), float(d), float(a), label
+            break
+
+    retail_d = row.get("B365D")
+    retail_d = float(retail_d) if pd.notna(retail_d) else None
+
+    return {
+        "entry_home": entry_h, "entry_draw": entry_d, "entry_away": entry_a, "entry_source": entry_source,
+        "close_home": close_h, "close_draw": close_d, "close_away": close_a, "close_source": close_source,
+        "retail_draw": retail_d,
+    }
+
+
 def validate_matches(df: pd.DataFrame, min_valid_odds: float = 1.01) -> tuple[pd.DataFrame, dict]:
     """Strict validation of canonical-schema historical matches (see
     src.ingestion.normalizer.CANONICAL_COLUMNS).
