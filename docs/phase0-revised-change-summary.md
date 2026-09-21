@@ -120,23 +120,48 @@ It prints a report dict (`rows_read`, `predictions_written`,
 folded into this document, or file it as a comment on the deployment
 ticket.
 
-## Manual steps required outside this session
+## Post-deployment verification (completed)
 
-1. **Register an OIDC provider** (Google Cloud Console is the path of
-   least resistance) and populate `.streamlit/secrets.toml`'s `[auth]`
-   block plus `[admin] emails = [...]` — documented in full in the
-   README's "Public deployment & admin auth" section. This repo cannot
-   create that registration itself.
-2. **Run `supabase/migrations/0002_phase0_revised.sql`** (existing
-   project) or `supabase/schema.sql` (fresh project) in the Supabase SQL
-   editor.
-3. **Confirm RLS UPDATE/DELETE rejection for real** — from the SQL
-   editor or a REST client using the `anon` key, attempt an UPDATE and a
-   DELETE against `predictions` and `settlements`; both should fail. This
-   sandbox's network policy blocks `supabase.co`, so it could not be
-   exercised live here.
-4. **Run the migration script** against the real local ledger file, per
-   above, and confirm the printed row counts look right.
+Everything below was blocked on network egress this sandbox doesn't have,
+so it was walked through live against the deployed app and the real
+Supabase project:
+
+1. **OIDC provider** — registered with Auth0 (`kalokalo.us.auth0.com`)
+   rather than Google (Google Cloud now gates new-project OAuth client
+   creation behind a billing prompt in some accounts; Auth0's free tier
+   doesn't). `.streamlit/secrets.toml`'s `[auth]`/`[admin]` blocks
+   populated locally and the same block pasted into Streamlit Cloud's
+   Settings → Secrets. **Confirmed working live**: an allow-listed admin
+   signed in via `st.login()` and the full admin sidebar rendered.
+   - One real bug found and fixed in this pass: `requirements.txt` pinned
+     `streamlit>=1.42` but never installed the `[auth]` extra, so
+     `Authlib` (which `st.login()` requires at runtime) was missing on
+     Streamlit Cloud and every login attempt failed with "Admin login
+     isn't configured yet." Fixed by switching to `streamlit[auth]>=1.42`.
+2. **Supabase migration SQL** — `0002_phase0_revised.sql` run in the
+   Supabase SQL editor against the existing live project. Reported
+   success, no errors.
+3. **RLS UPDATE/DELETE rejection** — verified structurally (the migration
+   SQL that ran contains no `UPDATE`/`DELETE` policy on `predictions` or
+   `settlements`, only `SELECT`+`INSERT`), not by a live curl-based
+   attempted write. An initial attempt at a live REST-API proof-by-curl
+   was abandoned partway through as more trouble than it was worth for
+   this pass — both target tables were still empty at the time, so
+   `[]` responses would have been trivially true regardless of RLS. Worth
+   revisiting with a disposable test row if this needs a stronger,
+   database-level guarantee on record.
+4. **End-to-end smoke test — real pipeline run.** Logged in as admin,
+   clicked "Run pipeline" with a live Odds API key configured. Result:
+   fresh predictions (`Priced 0m ago · live_odds`, `Feed: Live Odds API
+   (Consensus)`, 20 fixtures) appeared on the public Matchday page
+   immediately after, proving the full round trip — historical fetch →
+   fit → live odds fetch → `record_predictions_to_supabase` write →
+   public `fetch_latest_predictions` read — works against the real
+   deployment, not just against mocks in the test suite.
+5. **Local ledger migration** — not run. There's no known pre-existing
+   `data/ledger.parquet` to migrate for this deployment; the script
+   (`scripts/migrate_local_ledger_to_supabase.py`) remains available and
+   unit-tested if one turns up later.
 
 ## Known gaps / deviations, stated explicitly
 
