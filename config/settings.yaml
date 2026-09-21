@@ -32,6 +32,11 @@ edge:
   kelly_fraction: 0.15
   single_match_cap: 0.025
   daily_slate_cap: 0.08
+  # Notional bankroll unit recorded alongside each shadow stake
+  # (predictions.bankroll_at_slate) -- there's no real bankroll-tracking
+  # system yet, so stakes stay expressed as a fraction of this single
+  # placeholder unit, same as stake_pct always has been.
+  shadow_bankroll_units: 1.0
 
 ledger:
   path: "data/ledger.parquet"

@@ -24,7 +24,10 @@ from src.ingestion.historical import load_all, load_settings, season_codes
 from src.ingestion.normalizer import normalize_dataframe
 from src.ingestion.odds_feed import load_fixture_csv
 from src.models.dixon_coles import DixonColesModel
+from src.models.simulator import match_probabilities, top_scorelines
 from src.tracking.ledger import Ledger
+from src.tracking.supabase_ledger import get_supabase_client, prediction_row_from_pipeline, write_predictions
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,6 +62,7 @@ def build_predictions(
     cfg = _resolve_app_config(settings)
     engine = DomainPredictionEngine(config=cfg)
     return engine.predict_slate(fixtures, models_dict)
+
 
 
 def load_historical_matches(leagues: list[str], seasons_back: int, settings: dict) -> pd.DataFrame:
@@ -106,8 +110,45 @@ def fit_model(
 
 
 
-def record_ledger(predictions: pd.DataFrame, settings: dict) -> None:
+def record_predictions_to_supabase(
+    predictions: pd.DataFrame, model: DixonColesModel, settings: dict,
+    price_source: str, run_id: str | None = None, client=None,
+) -> dict:
+    """Write every prediction row to Supabase — the only ledger (Phase 0
+    revised; the local file ledger has been retired, see
+    scripts/migrate_local_ledger_to_supabase.py for its one-time
+    migration). Shared by both entry points into this pipeline (the CLI's
+    `run()` below and app.py's admin-gated "Run pipeline" action) so
+    there's exactly one write path, not two copies that could drift.
+
+    Never raises: a Supabase outage must never block showing predictions
+    on screen or crash the CLI. Returns a status dict — {"run_id",
+    "status", "failed"} — for the caller to surface (System Health panel
+    in the UI, a log line for the CLI).
+    """
+    import uuid
+
     if predictions.empty:
+        return {"run_id": run_id, "status": "no predictions to record", "failed": 0}
+
+    run_id = run_id or str(uuid.uuid4())
+    client = client or get_supabase_client()
+    if client is None:
+        return {"run_id": run_id, "status": "Not configured", "failed": len(predictions)}
+
+    rows = []
+    for _, row in predictions.iterrows():
+        mdl = model.get(row["league"]) if isinstance(model, dict) else model
+        rows.append(prediction_row_from_pipeline(row, run_id, mdl, settings, price_source))
+
+    failed = write_predictions(rows, client=client)
+    status = "OK" if failed == 0 else f"{failed} row(s) failed this run"
+    return {"run_id": run_id, "status": status, "failed": failed}
+
+
+def record_ledger(predictions: pd.DataFrame, settings: dict) -> None:
+    """Record predictions to local ledger if configured (backwards compatibility)."""
+    if predictions.empty or "ledger" not in settings:
         return
     ledger = Ledger(settings["ledger"]["path"], fmt=settings["ledger"]["format"])
     for _, row in predictions.iterrows():
@@ -123,6 +164,7 @@ def record_ledger(predictions: pd.DataFrame, settings: dict) -> None:
             stake_pct=row["stake_pct"],
             timestamp=pd.Timestamp.now(tz="UTC"),
         )
+
 
 
 def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path: str | None = None) -> pd.DataFrame:
@@ -142,7 +184,11 @@ def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path
         return pd.DataFrame()
 
     predictions = build_predictions(fixtures, models, settings)
-    record_ledger(predictions, settings)
+    if "ledger" in settings:
+        record_ledger(predictions, settings)
+    result = record_predictions_to_supabase(predictions, models, settings, price_source="cli_fixture_csv")
+    logger.info("Supabase ledger: %s (run_id=%s, failed=%d)", result["status"], result["run_id"], result["failed"])
+
     return predictions
 
 
