@@ -1,4 +1,9 @@
 """
+# WP8: unwired from the live app pending re-evaluation. This module
+# still exists and is still tested, but Phase 0 (revised) removed
+# source blending / "Fit on xG" as an admin option in app.py — see the
+# README's "Remove xG from the live path" note.
+
 Multi-source historical data blending.
 
 football-data.co.uk supplies match results and closing 1X2 odds but no

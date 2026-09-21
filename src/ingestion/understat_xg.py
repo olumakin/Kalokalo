@@ -1,4 +1,10 @@
 """
+# WP8: unwired from the live app pending re-evaluation. This module and
+# its consumer (src/ingestion/sources.py) still exist and are still
+# tested, but Phase 0 (revised) removed Understat as a selectable
+# source from app.py's public deployment — see the README's "Remove xG
+# from the live path" note.
+
 Understat.com historical match Expected Goals (xG) ingestion.
 
 Understat has no public API. Match-level xG is embedded as an
