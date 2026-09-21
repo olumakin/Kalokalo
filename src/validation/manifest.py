@@ -23,6 +23,9 @@ EXTERNAL_CONTRACT_IDENTITIES: dict[str, str] = {
     "settlement_contract": "SettlementContract::v1.0",
     "closing_line_contract": "ClosingLineContract::v1.0",
     "fixture_lifecycle_contract": "FixtureLifecycleContract::v1.0",
+    "forecast_capture_contract": "ForecastCaptureContract::v1.0",
+    "market_benchmark_contract": "MarketBenchmarkContract::v1.0",
+    "forecast_timing_contract": "ForecastTimingContract::v1.0",
 }
 
 HEX_40_REGEX = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -179,3 +182,22 @@ def create_epoch_manifest(
         epoch_id=epoch_id,
         is_test=is_test,
     )
+
+
+from src.validation.provenance import (
+    ResultAvailabilityProvenance,
+    compute_model_fit_identity,
+    compute_training_data_identity,
+)
+
+__all__ = [
+    "EXTERNAL_CONTRACT_IDENTITIES",
+    "EpochManifest",
+    "create_epoch_manifest",
+    "get_code_identity",
+    "get_semantic_config_identity",
+    "is_working_tree_dirty",
+    "compute_training_data_identity",
+    "compute_model_fit_identity",
+    "ResultAvailabilityProvenance",
+]

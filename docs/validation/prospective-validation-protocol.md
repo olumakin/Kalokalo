@@ -88,3 +88,28 @@ Every observation binds to the cryptographic identity triad:
 ### 3.4 Kickoff Semantics
 * `scheduled_kickoff_utc`: Latest scheduled match time. Schedule history tracks all historical adjustments.
 * `actual_kickoff_utc`: Actual whistle time. **Never inferred** from scheduled kickoff or elapsed wall-clock time; requires explicit provider or official status (`UNKNOWN`, `PROVIDER_REPORTED`, `OFFICIALLY_VERIFIED`).
+
+---
+
+## 4. Implemented Stage 3 Contracts: Pre-Match Forecast & Benchmark Capture
+
+### 4.1 Capture Modes & Non-Prospective Gates
+* **Modes**: `TEST`, `PRE_EPOCH_DRY_RUN`, `PROSPECTIVE`.
+* **Pre-Epoch Guard**: Any attempt to emit `PROSPECTIVE` evidence while `EPOCH_1_MODEL_SHA = UNASSIGNED` raises `ProspectiveActivationBlockedError` fail-closed.
+* **Non-Prospective Evidence Invariant**: All Stage 3 records are tagged `test_flag = TEST_ONLY_NON_PROSPECTIVE`, `prospective_eligible = False`, and `evidence_classification = "PRE_EPOCH_VALIDATION"`.
+* **Prospective Denominator Guard**: `PROSPECTIVE_DENOMINATOR` remains strictly `0`.
+
+### 4.2 Forecast Capture Daemon (`ForecastCaptureContract::v1.0`)
+* **Authoritative Fixture Consumption**: Consumes fixtures exclusively through Stage 2 `FixtureStateProjection` by `internal_fixture_id`.
+* **Timing Contract (`ForecastTimingContract::v1.0`)**: Evaluates $t_{\text{pred}} < t_{\text{kickoff\_sched}} - \text{decision\_lead\_time}$ (default 60 minutes). Predictions attempted at or after cutoff are recorded as `POST_CUTOFF_ATTEMPT` with `model_probabilities = None`.
+* **Model Failure Auditing**: Typed failures (`UNKNOWN_TEAM`, `INSUFFICIENT_HISTORY`, `MODEL_NON_CONVERGENCE`, `POST_CUTOFF_ATTEMPT`, `UNMODELED_LEAGUE`) append auditable records into the Stage 1 store. Zero fabricated probabilities; zero silent skips.
+* **Forecast-Market Decoupling**: Forecast records persist independently of odds availability or market provider outages.
+
+### 4.3 Market Benchmark Daemon (`MarketBenchmarkContract::v1.0`)
+* **Reference Consensus Only**: Captures contemporaneous 1X2 market quotes as benchmark evidence. Strictly tagged `is_executable_price = False` (never executable, zero betting decisions, zero Kelly sizing, zero PnL/CLV). Stage 3 does NOT implement A09.
+* **Raw & Derived Reproducibility**: Persists `raw_odds_home`, `raw_odds_draw`, `raw_odds_away`, and `devig_method`, enabling 100% forensic recomputation of `derived_market_p_*`.
+* **Typed Failures**: Source outages or invalid odds emit append-only failure records (`MARKET_SOURCE_UNAVAILABLE`, `MARKET_ODDS_INVALID`, `MARKET_PAYLOAD_INVALID`, `MARKET_TIMESTAMP_INVALID`) without mutating predictions.
+* **Temporal Validation**: Rejects quotes with >120s future clock skew or quotes timestamped after a known actual kickoff.
+
+### 4.4 Fixture Join Invariant
+* Forecast predictions and market benchmark snapshots join **exclusively** on Stage 2 `internal_fixture_id`. Human-readable labels, team display formatting, and mutable date strings are strictly prohibited as join keys.

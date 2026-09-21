@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class EventType(str, Enum):
     FIXTURE_LIFECYCLE = "fixture_lifecycle"
     PREDICTION_RECORD = "prediction_record"
+    PREDICTION_CAPTURE_SUCCESS = "prediction_capture_success"
+    PREDICTION_CAPTURE_FAILURE = "prediction_capture_failure"
     MARKET_BENCHMARK_SNAPSHOT = "market_benchmark_snapshot"
     EXECUTION_QUOTE_SNAPSHOT = "execution_quote_snapshot"
     DECISION_RECORD = "decision_record"
