@@ -4,7 +4,9 @@ pandas>=2.1
 pydantic>=2.4
 pyarrow>=14.0
 pytest>=7.4
-streamlit>=1.28
+# >=1.42 for st.login/st.user/st.logout (OIDC admin auth, Phase 0 revised) —
+# the actual floor, not just what happened to already be installed.
+streamlit>=1.42
 requests>=2.31
 PyYAML>=6.0
 # supabase>=2.10 is required for the new sb_publishable_/sb_secret_ key

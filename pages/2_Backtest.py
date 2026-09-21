@@ -1,16 +1,18 @@
-"""Walk-Forward Backtest — strict chronological out-of-sample validation."""
+"""Walk-Forward Backtest — strict chronological out-of-sample validation. Admin only."""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from src.ingestion.demo_data import generate_demo_matches
 from src.ingestion.historical import load_settings
 from src.validation.backtest import WalkForwardBacktest
 from src.validation.metrics import brier_score, calibration_curve, log_loss, max_drawdown, roi_flat_stake
+from src.webapp.auth import require_admin
 
 st.set_page_config(page_title="DVPE — Backtest", page_icon="🧪", layout="wide")
+require_admin()
+
 st.title("Walk-Forward Backtest")
 st.caption(
     "For matchday T, the model is trained only on matches strictly before T — zero data leakage. "
@@ -23,15 +25,9 @@ matches = st.session_state.get("matches")
 with st.sidebar:
     st.header("History")
     if matches is None or matches.empty:
-        st.caption("No history from the Matchday page yet — generate demo data here instead.")
-        if st.button("Generate demo history", use_container_width=True):
-            matches = generate_demo_matches(n_teams=10, rounds=5)
-            st.session_state["matches"] = matches
+        st.caption("No history loaded — run the pipeline on the **Matchday** page first.")
     else:
         st.caption(f"Using {len(matches)} matches loaded from the Matchday page.")
-        if st.button("Use fresh demo history instead", use_container_width=True):
-            matches = generate_demo_matches(n_teams=10, rounds=5)
-            st.session_state["matches"] = matches
 
     st.header("Backtest settings")
     xi = st.number_input("Time-decay ξ", min_value=0.001, max_value=0.02, value=float(settings["model"]["xi_decay"]), step=0.001, format="%.4f")
