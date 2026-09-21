@@ -59,3 +59,31 @@ CREATE POLICY "Allow write predictions" ON predictions FOR INSERT TO authenticat
 ALTER TABLE settlements ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow read settlements" ON settlements FOR SELECT TO anon, authenticated USING (true);
 CREATE POLICY "Allow write settlements" ON settlements FOR INSERT TO authenticated, service_role WITH CHECK (true);
+
+-- Stage 1: Immutable Prospective Validation Event Store (Append-Only)
+CREATE TABLE prospective_events (
+    id SERIAL PRIMARY KEY,
+    event_id TEXT UNIQUE NOT NULL,
+    event_type TEXT NOT NULL,
+    epoch_id TEXT,
+    idempotency_key TEXT UNIQUE NOT NULL,
+    created_at_utc TIMESTAMPTZ DEFAULT NOW(),
+    test_flag TEXT DEFAULT 'PROSPECTIVE',
+    target_event_id TEXT,
+    code_identity TEXT,
+    semantic_config_identity TEXT,
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT chk_test_flag CHECK (test_flag IN ('TEST_ONLY_NON_PROSPECTIVE', 'PROSPECTIVE')),
+    CONSTRAINT chk_event_epoch CHECK (
+        test_flag = 'TEST_ONLY_NON_PROSPECTIVE' OR (epoch_id IS NOT NULL AND LENGTH(epoch_id) > 0)
+    )
+);
+
+CREATE INDEX idx_events_epoch ON prospective_events (epoch_id);
+CREATE INDEX idx_events_idempotency ON prospective_events (idempotency_key);
+CREATE INDEX idx_events_type ON prospective_events (event_type);
+
+ALTER TABLE prospective_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow read prospective_events" ON prospective_events FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Allow write prospective_events" ON prospective_events FOR INSERT TO authenticated, service_role WITH CHECK (true);
+-- Append-only enforcement: No UPDATE or DELETE policy granted on prospective_events.

@@ -1,9 +1,13 @@
 """
-Persistent, append-only prediction ledger (PID Milestone 5 / Phase 4).
+Persistent prediction ledger (PID Milestone 5 / Phase 4 / Validation Stage 1).
 
-Every prediction the pipeline generates is recorded here, including ones
-that don't qualify as bets, so model calibration can be audited against
-actual outcomes and market movement after the fact.
+STAGE 1 ROLE: Local developer read replica, offline cache, and evidence export ONLY.
+Authoritative multi-writer prospective validation relies on the append-only event store.
+
+KNOWN CONCURRENCY LIMITATION: CONCURRENT_LOST_UPDATE_UNPROTECTED.
+File replacement via temporary file swap (.tmp + replace) guarantees write atomicity
+against partial-file corruption (PARTIAL_WRITE_CORRUPTION_PROTECTED) for a single process,
+but does NOT provide cross-process transactional locking or concurrent-write isolation.
 """
 from __future__ import annotations
 
