@@ -7,7 +7,8 @@ Poisson goal model against de-vigged market consensus odds and sizes
 positions with Fractional Kelly under dual exposure caps.
 
 See the Project Initiation Document for full modeling detail, risk
-framework, and phased delivery plan.
+framework, and phased delivery plan. See `docs/architecture.md` for the
+public/admin trust-boundary diagram (Phase 0 revised).
 
 ## Setup
 
@@ -38,84 +39,80 @@ pytest
 
 ## Web interface
 
-A four-page Streamlit app:
+A public, five-page Streamlit app. Two pages are open to everyone;
+three are admin-only (Streamlit OIDC login — see "Public deployment &
+admin auth" below):
 
-- **Matchday** (`app.py`) — a Score Predictor view: every analyzed
-  fixture gets a card with its most-likely final score, runner-up
-  score, xG, and a home/draw/away probability bar, all extracted from
-  the real fitted 10x10 scoreline matrix (`src/models/simulator.py:
-  top_scorelines`) — not a random or simulated number. A "HIGH/MODERATE
-  TIE POTENTIAL" badge flags draw-likely fixtures, alongside a neutral
-  "FORECAST ONLY" badge — stake/payout language and the EV qualification
-  badge are deliberately kept off this primary card view (see
-  "Compliance & durable ledger" below); the underlying +3% EV
-  qualification logic still runs and is recorded to both ledgers, it's
-  just not surfaced here. Pick historical
-  data sources (offline demo generator, or football-data.co.uk +
-  Understat to blend, or a CSV upload) in the sidebar; upcoming fixtures
-  are fetched automatically through a three-tier chain — live consensus
-  odds from The Odds API if a key is set, then the free weekly
-  football-data.co.uk fixture sheet (no key needed), then a bundled
-  sample fixture card as a last resort.
-- **Model Diagnostics** (`pages/1_Model_Diagnostics.py`) — fitted
-  hyperparameters (μ₀, γ, ρ), convergence/fallback status, and per-team
-  attack/defense ratings with charts.
-- **Backtest** (`pages/2_Backtest.py`) — runs the strict walk-forward
-  engine over the loaded history and reports log-loss, Brier score,
-  flat-stake ROI, max drawdown, and a calibration curve.
-- **Ledger** (`pages/3_Ledger.py`) — full audit trail with filters, and a
-  form to backfill actual results (closing the PnL/CLV loop).
+- **Matchday** (`app.py`, public) — a read-only Score Predictor view.
+  Every published fixture gets a card with its most-likely final score,
+  runner-up score, xG, and a home/draw/away probability bar, all
+  derived at read time from the stored λ/μ/ρ via the real fitted 10x10
+  scoreline matrix (`src/models/simulator.py: build_score_matrix,
+  top_scorelines`) — not a random or simulated number, and not
+  recomputed differently than what an admin's run actually fit. A
+  "HIGH/MODERATE TIE POTENTIAL" badge flags draw-likely fixtures,
+  alongside a neutral "FORECAST ONLY" badge. **No stake, return, or
+  profit figure is ever shown to a public visitor** — this page's only
+  data source is `fetch_latest_predictions()` (a Supabase read); it
+  never fits a model or calls a data feed for anyone who isn't a
+  signed-in admin. A signed-in admin additionally sees the sidebar's
+  data-source/Run-pipeline controls, and (only for a league whose
+  `gate_status` is `'proceed'` with `approved_at` set — see below) a
+  "Shadow: not validated" expander with the computed EV/stake.
+- **Model Diagnostics** (`pages/1_Model_Diagnostics.py`, public) —
+  fitted hyperparameters (μ₀, γ, ρ), convergence/fallback status, and
+  per-team attack/defense ratings with charts, from whichever model is
+  in the current browser session's state (only populated after an
+  admin's own pipeline run in that session — a fresh visitor sees "run
+  the pipeline first" and nothing else, the same graceful empty state
+  this page already had).
+- **Backtest** (`pages/2_Backtest.py`, admin-only) — runs the strict
+  walk-forward engine over the admin's last-loaded history and reports
+  log-loss, Brier score, flat-stake ROI, max drawdown, and a
+  calibration curve.
+- **Ledger** (`pages/3_Ledger.py`, admin-only) — full prediction audit
+  trail from Supabase with filters, and a form to record a settlement
+  (`settlements` table — never modifies the original `predictions` row).
+- **Terms of Use** (`pages/4_Terms.py`, public) — placeholder legal
+  text, clearly marked pending review.
 
-This sandbox has no outbound network access to football-data.co.uk, so
-`src/ingestion/demo_data.py` generates a plausible offline match history
-(real team codes, a fitted-model-vs-noisy-market dynamic) so the app is
-fully explorable without a live data source — "Use offline demo data"
-is checked by default in the sidebar. Fixtures always come from
-`get_upcoming_fixtures` (`src/ingestion/odds_feed.py`), trying live odds,
-then the free schedule, then `data/fixtures/upcoming.csv` in order — every
-run in this sandbox hits that last tier, since none of the remote sources
-are reachable here. Because the sample card's real Big 5 teams (Arsenal,
-Real Madrid, Juventus, ...) mostly don't overlap the demo history's
-randomly-sampled team pool, the out-of-the-box run in this sandbox
-usually lands on the below-threshold "closest misses" view rather than a
-qualified pick — showing that is the point (a working example of the
-tool declining to recommend a stake), not a bug.
+Admin's only historical data source is football-data.co.uk (no demo
+mode, no CSV upload, no Understat/xG blending — see "Removed from the
+live app" below); upcoming fixtures are fetched automatically through a
+three-tier chain — live consensus odds from The Odds API if a key is
+set, then the free weekly football-data.co.uk fixture sheet (no key
+needed), then a bundled sample fixture card as a last resort.
 
-## Multi-source data blending
+## Removed from the live app (Phase 0 revised)
 
-football-data.co.uk alone gives goals and closing odds but no
-shot-quality signal — a 1-0 can easily have been a 2-2 on underlying
-chances. The Matchday sidebar's "Blend online sources" option
-(`src/ingestion/sources.py`) can merge it with:
+The app going public removed several things from the live admin path
+that still exist in the repo as tested, reusable modules — not deleted,
+just no longer reachable from `app.py`:
 
-- **Understat** (`src/ingestion/understat_xg.py`) — match-level xG,
-  scraped from an embedded JSON blob on Understat's league pages (no
-  public API exists). Merged onto the base results by (date, league,
-  home_team, away_team), in either mode:
-  - *Blended Consensus* (default) — keep every base match; xG is null
-    where Understat has no coverage.
-  - *Strict Intersection* — keep only matches both sources cover.
-  - Optionally, fit Dixon-Coles directly on xG instead of raw goals
-    (`DixonColesModel.fit(goal_columns=("home_xg", "away_xg"))`) — a
-    lower-variance target, at the cost of xG not being literally
-    Poisson count data (see that method's docstring).
-- **The Odds API** (`src/ingestion/odds_feed.py:fetch_live_odds`) — a
-  *fixture-side* source, not historical: its free tier serves live
-  upcoming odds only. `get_upcoming_fixtures` calls it automatically for
-  every Big 5 league and averages the 1X2 price across every bookmaker
-  in the response for a genuine multi-book consensus (not just whichever
-  book comes first). Needs an API key — the sidebar only asks for one if
-  `ODDS_API_KEY` isn't already set in the environment or
-  `.streamlit/secrets.toml`.
-- **football-data.co.uk free fixture sheet**
-  (`src/ingestion/odds_feed.py:fetch_free_schedule`) — a second
-  fixture-side fallback, no key needed: `fixtures.csv` on the same site
-  as the historical results, refreshed roughly weekly (Fridays) with
-  Bet365 pre-match odds for the coming weekend's Big 5 matches. A row
-  missing any of the three 1X2 prices is dropped rather than filled
-  with a placeholder — a fabricated price would make the EV computed
-  against it meaningless on a tool whose job is finding real
-  mispricings, not just approximately wrong in a way that looks fine.
+- **CSV upload and offline demo data** — the app's only public purpose
+  now is showing real published predictions, so a way to fit the model
+  on arbitrary uploaded data or synthetic data no longer belongs in the
+  live path at all, for any user. `src/ingestion/demo_data.py` moved to
+  `tests/fixtures/demo_data.py` — a test fixture only; no app code
+  imports it (enforced by `tests/test_public_view_leakage.py`).
+- **Understat xG blending / "Fit on xG"** (WP8) — `src/ingestion
+  /sources.py` and `src/ingestion/understat_xg.py` still exist, are
+  still tested (`tests/test_sources.py`, `tests/test_understat_xg.py`),
+  and are marked with a `# WP8` comment at the top of each — re-evaluate
+  wiring them back in as a future work package, not lost work.
+  football-data.co.uk alone gives goals and closing odds but no
+  shot-quality signal, which is exactly the gap Understat's match-level
+  xG (scraped from an embedded JSON blob on Understat's league pages —
+  no public API exists) was meant to close; see those two modules'
+  docstrings for the scraping/blending mechanics if reviving this.
+- **The Odds API / free-schedule fixture feed** — unchanged, still
+  live: `src/ingestion/odds_feed.py:get_upcoming_fixtures` averages the
+  1X2 price across every bookmaker in the response for a genuine
+  multi-book consensus. Needs an API key for the live tier — the admin
+  sidebar only asks for one if `ODDS_API_KEY` isn't already set in the
+  environment or `.streamlit/secrets.toml`; a row missing any of the
+  three 1X2 prices is dropped by the free-schedule tier rather than
+  filled with a placeholder.
 
 ## Season-aware odds selection & strict validation (WP1)
 
@@ -271,65 +268,147 @@ can change without notice — failures degrade to an empty result with a
 logged warning rather than breaking the pipeline, but nothing here was
 verified against a live pull (this sandbox has no outbound access).
 
-## Compliance & durable ledger
+## Public deployment & admin auth (Phase 0 revised)
 
-**UI compliance.** Every page shows a "NOT FINANCIAL ADVICE" banner with
-a Responsible Gambling link (`RG_URL` env var / secret, defaults to
-BeGambleAware) — the sidebar carries the same notice. The Matchday
-cards intentionally omit stake/payout figures and the "+EV PLAY" badge;
-that computation still runs in `build_predictions` and is written to
-both ledgers below, it's just not displayed on the primary card.
+The app is public. **Supabase is the only ledger** — the local file
+ledger (`src/tracking/ledger.py`) has been deleted; see "One-time local
+ledger migration" below if this deployment ever ran with it active.
 
-**Local ledger** (`src/tracking/ledger.py`) is unchanged — an
-append-only Parquet/CSV file under `data/`, read by the Ledger page.
-It's ephemeral on hosts without a persistent disk (e.g. a fresh
-Streamlit Cloud container), which is why the Supabase ledger below
-exists as a durable, additive companion, not a replacement.
+**Age gate & legal notices.** A public visitor must confirm 18+ before
+any content renders (`st.session_state["age_confirmed"]`, session-scoped
+— confirmed once per browser session, not stored server-side). Every
+page carries a "NOT FINANCIAL ADVICE" banner with a Responsible
+Gambling link (`RG_URL` env var / secret, defaults to BeGambleAware);
+`pages/4_Terms.py` is a placeholder Terms of Use page pending legal
+review.
 
-**Supabase remote ledger** (`src/tracking/supabase_ledger.py`) writes
-every prediction to a managed Postgres table outside the app's own
-container, gated by Row Level Security to INSERT + SELECT only on the
-anon/publishable key — there is no UPDATE or DELETE policy, so a
-prediction can't be edited after the fact. Settling a fixture is a
-separate append-only insert into `settlements`, never a mutation of its
-`predictions` row. To enable it:
+**No stakes for the public.** The Matchday cards show forecasts and
+probabilities only — fixture, kickoff, P(home)/P(draw)/P(away),
+most-likely scorelines, feed tier, and how long ago the prediction was
+priced. No stake, return, profit, or bankroll figure is ever shown to a
+visitor who isn't a signed-in admin; enforced by
+`tests/test_public_view_leakage.py`, which asserts every reference to
+`stake_shadow`/`ev_entry` in `app.py` falls inside an `if admin:` block
+(via AST, not a string grep, so it can't be fooled by comments).
 
-1. Create a Supabase project, then run `supabase/schema.sql` once in
-   its SQL Editor (Project → SQL Editor → New query) — this module only
-   holds the anon key, which has no DDL access to create the tables
-   itself.
+**Admin authentication.** Uses Streamlit's built-in OIDC support
+(`st.login`/`st.user`/`st.logout`, `src/webapp/auth.py`) plus an email
+allow-list — `is_admin()` requires both a signed-in user *and* an email
+on that list, wrapped defensively so an unconfigured `[auth]` block
+degrades to "not admin" rather than crashing the public page. To enable
+it, register an OIDC app with a provider (Google Cloud Console is the
+path of least resistance) and add to `.streamlit/secrets.toml`
+(gitignored — never commit this file):
+
+```toml
+[auth]
+redirect_uri = "https://<your-app>.streamlit.app/oauth2callback"
+cookie_secret = "<random string>"
+client_id = "..."
+client_secret = "..."
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+
+[admin]
+emails = ["you@example.com"]
+```
+
+Until `[auth]`/`[admin]` are configured, every visitor (including you)
+sees the public, read-only view only — there's no way to run the
+pipeline or reach the admin pages except through a working OIDC login.
+`2_Backtest.py` and `3_Ledger.py` both call `require_admin()` as their
+very first line: a non-admin sees exactly the word "Restricted" and
+nothing else on either page (verified via `AppTest` in
+`tests/test_app_public_access.py`).
+
+**Staking gate.** A `gate_status` table (one row per league,
+`league_code, status, run_id, decided_at, approved_by, approved_at`)
+controls whether an admin ever sees a computed stake at all — seeded to
+`status='inconclusive'` for all five leagues by `supabase/schema.sql`.
+There is no in-app UI to change it: approving a league is a deliberate,
+manual Supabase-side action (set `status='proceed'` and `approved_at`),
+not a feature of this app. Every pipeline run still computes and writes
+`stake_shadow`/`bankroll_at_slate` to `predictions` regardless of gate
+status (so the record exists once a league is later approved) — gate
+status only controls whether the admin UI *displays* it, labelled
+"Shadow: not validated".
+
+**Supabase schema.** `src/tracking/supabase_ledger.py` writes every
+prediction to a managed Postgres table, gated by Row Level Security to
+INSERT + SELECT only on the anon/publishable key for
+`predictions`/`settlements` (no UPDATE or DELETE policy on either —
+a prediction can't be edited after the fact, and settling a fixture is
+a separate append-only insert into `settlements`, never a mutation of
+its `predictions` row) and SELECT only on `gate_status` (the app never
+writes it). To set up:
+
+1. **Fresh Supabase project**: run `supabase/schema.sql` once in the
+   SQL Editor (Project → SQL Editor → New query).
+   **Existing project** (already ran the original Phase 0 schema):
+   run `supabase/migrations/0002_phase0_revised.sql` instead — it
+   `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`s the new fields onto your
+   existing tables and adds `gate_status`, rather than trying to
+   `CREATE TABLE` something that already exists.
 2. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` (the `sb_publishable_...`
    key from Project Settings → API) via environment variables or
-   `.streamlit/secrets.toml` (gitignored — never commit this file).
+   `.streamlit/secrets.toml`.
 
 Requires `supabase==2.31.0`, pinned in `requirements.txt`: the older
 `2.3.0` release validates API keys locally against a hardcoded
 JWT-shaped regex and rejects the newer `sb_publishable_`/`sb_secret_`
 key format before ever making a network call.
 
-If Supabase isn't configured, `get_supabase_client()` returns `None`
-and the app runs exactly as before — the write is skipped, not
-retried or errored. A sidebar "System Health" panel reports both
-ledgers' write status and failure counts after each run.
+If Supabase isn't configured or unreachable, `get_supabase_client()`
+returns `None` and every write function degrades to "failed, logged"
+rather than raising — but unlike Phase 0 (where this was an additive
+side-channel), Supabase is now the *only* ledger, so the admin sidebar
+and Ledger page both show a "🔴 Ledger offline" status
+(`is_ledger_online()`, a cheap 1-row probe) and grey out every
+write-triggering control (Run pipeline, Record outcome) until it
+recovers.
+
+**One-time local ledger migration.** If this deployment ever ran with
+the (now-deleted) local file ledger active, its rows need moving across
+once:
+
+```bash
+python -m scripts.migrate_local_ledger_to_supabase --path data/ledger.parquet
+```
+
+Reads the old parquet/csv directly (doesn't import the deleted
+`Ledger` class), maps each row onto the new schema — fields the old
+ledger never captured (λ/μ/ρ, matchweek, three-way entry/close prices,
+...) are written `NULL`, the honest representation, not a guess — and
+also writes a `settlements` row for any old entry that already had a
+result recorded (reverse-deriving the closing draw price from the old
+ledger's `clv` field where possible). Prints a report of rows
+read/written/failed/skipped; safe to re-run (idempotent upsert on the
+predictions side).
 
 ## Project layout
 
 ```
 config/          Hyperparameters and canonical team-name mappings
-data/            Cached historical results, fixture cards, prediction ledger
-src/ingestion/   Historical/fixture/odds ingestion, team normalization, offline demo data,
-                 Understat xG scraper, multi-source blending, season-aware odds hierarchy
-                 + strict validation (data_loader.py)
+data/            Cached historical results, fixture cards
+src/ingestion/   Historical/fixture/odds ingestion, team normalization,
+                 season-aware odds hierarchy + strict validation (data_loader.py);
+                 sources.py / understat_xg.py still exist, tested, but unwired (WP8)
 src/models/      Dixon-Coles fitting engine and 10x10 scoreline simulator
 src/analytics/   De-vigging (multiplicative / Shin) and EV / Kelly sizing
 src/validation/  Strict walk-forward backtest and evaluation metrics, plus the WP3
                  gate-evaluation harness (bootstrap, CLV, calibration, three-way scoring,
                  gate_harness.py, gate_report.py)
-src/tracking/    Append-only local prediction ledger + additive Supabase remote ledger
-supabase/        schema.sql — run once in the Supabase SQL editor to enable the remote ledger
+src/tracking/    Supabase-backed prediction ledger (the only ledger — the local file
+                 ledger was retired in Phase 0 revised)
+src/webapp/      Admin authentication (auth.py: is_admin/require_admin, Streamlit OIDC)
+supabase/        schema.sql (fresh project) / migrations/0002_phase0_revised.sql
+                 (existing project) — run once in the Supabase SQL editor
+scripts/         migrate_local_ledger_to_supabase.py — one-time local-ledger migration
 src/pipeline.py  End-to-end CLI entry point + shared logic for the UI
-app.py           Streamlit dashboard — Matchday (home) page
-pages/           Streamlit dashboard — Model Diagnostics, Backtest, Ledger pages
+app.py           Streamlit dashboard — Matchday (public home) page
+pages/           Model Diagnostics (public), Backtest (admin), Ledger (admin),
+                 Terms of Use (public)
+tests/fixtures/  Offline synthetic match-history generator — test-only, not imported
+                 by any app code (demo_data.py)
 ```
 
 ## Deployment
@@ -380,19 +459,25 @@ Phases 1-5 of the PID are implemented as a working MVP:
 - [x] De-vig (multiplicative + Shin) and Fractional Kelly sizing with risk caps
 - [x] Persistent prediction ledger + Streamlit matchday dashboard
 
-Also implemented: multi-source historical blending (football-data.co.uk +
-Understat xG), a live odds-provider integration (The Odds API,
-multi-bookmaker consensus — see "Multi-source data blending" above),
-PID Phase 0 (compliance UI + additive Supabase durable ledger — see
-"Compliance & durable ledger" above), WP1 (season-aware odds hierarchy
-+ strict validation), WP2 (Dixon-Coles model corrections), and WP3
-(gate-evaluation harness — see those sections above). Per the WP1/WP2
-evidence-pack gate, WP3 has not yet been run against the full
-historical corpus.
+Also implemented: a live odds-provider integration (The Odds API,
+multi-bookmaker consensus), WP1 (season-aware odds hierarchy + strict
+validation), WP2 (Dixon-Coles model corrections), WP3 (gate-evaluation
+harness), and **Phase 0 revised** — the app is public: admin-gated
+Streamlit OIDC auth, Supabase as the sole ledger (local file ledger
+retired), no stakes shown to public visitors, a `gate_status` table
+controlling staking eligibility per league (seeded to `inconclusive`
+for all five), age gate + Terms of Use + Responsible Gambling notices,
+and CSV upload / offline demo data / Understat xG removed from the
+live app entirely (see "Removed from the live app" and "Public
+deployment & admin auth" above). Per the WP1/WP2 evidence-pack gate,
+WP3 has not yet been run against the full historical corpus, and no
+league's `gate_status` has been set to `proceed` — every shadow stake
+is computed and stored but hidden from the admin UI.
 
 Not yet wired: the `xi` decay grid search itself, which is exposed as a
 config surface (`model.xi_grid` in `config/settings.yaml`) for the
 validation harness to sweep; COVID-season flagging and cross-league
 parallelization in the WP3 harness (see that section's "Known gaps"
-above); and Betfair Exchange / FBref as additional
-sources (see caveats above).
+above); Betfair Exchange / FBref as additional sources; and Understat
+xG / multi-source blending, deferred to WP8 (see "Removed from the
+live app" above).
