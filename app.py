@@ -212,8 +212,9 @@ with st.sidebar:
         st.info("Admin sign-in required to run the pipeline.")
         try:
             st.login()
-        except Exception:  # noqa: BLE001 — [auth] not configured yet
+        except Exception as exc:  # noqa: BLE001 — [auth] not configured yet
             st.caption("Admin login isn't configured yet.")
+            st.caption(f"Debug (temporary, Phase 0 rollout): {exc}")
     else:
         try:
             st.button("Log out", on_click=st.logout, use_container_width=True)
