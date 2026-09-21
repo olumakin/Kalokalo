@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.models.dixon_coles import DixonColesModel, tau
+from src.models.dixon_coles import DixonColesModel, UnknownTeamError, tau
 from src.models.simulator import build_score_matrix, top_scorelines
 
 
@@ -62,9 +62,29 @@ class TestScoreMatrix:
         lam = np.array([1.4])
         mu = np.array([1.1])
         rho = 0.1
-        assert tau(np.array([0.0]), np.array([0.0]), lam, mu, rho)[0] == pytest.approx(1 - lam[0] * mu[0] * rho)
-        assert tau(np.array([1.0]), np.array([1.0]), lam, mu, rho)[0] == pytest.approx(1 - rho)
+        # Test all four Dixon-Coles adjustment factors (A01)
+        assert tau(np.array([0.0]), np.array([0.0]), lam, mu, rho)[0] == pytest.approx(1.0 - lam[0] * mu[0] * rho)
+        assert tau(np.array([0.0]), np.array([1.0]), lam, mu, rho)[0] == pytest.approx(1.0 + lam[0] * rho)
+        assert tau(np.array([1.0]), np.array([0.0]), lam, mu, rho)[0] == pytest.approx(1.0 + mu[0] * rho)
+        assert tau(np.array([1.0]), np.array([1.0]), lam, mu, rho)[0] == pytest.approx(1.0 - rho)
         assert tau(np.array([2.0]), np.array([2.0]), lam, mu, rho)[0] == pytest.approx(1.0)
+
+    def test_tau_marginal_preservation(self):
+        """Marginal probability of home goals x=0 must equal Poisson(0; lam) (A01)."""
+        lam = 1.4
+        mu = 1.1
+        rho = 0.08
+        matrix = build_score_matrix(lam, mu, rho, grid_size=20)
+        # Marginals along home goals x=0 and x=1
+        from scipy.stats import poisson
+        assert np.sum(matrix[0, :]) == pytest.approx(poisson.pmf(0, lam), rel=1e-3)
+        assert np.sum(matrix[1, :]) == pytest.approx(poisson.pmf(1, lam), rel=1e-3)
+
+    def test_inadmissible_tau_raises(self):
+        """Inadmissible rho producing negative tau must raise ValueError without silent clipping (A05)."""
+        # lam=4, mu=4, rho=0.1 -> 1 - 4*4*0.1 = -0.6 < 0
+        with pytest.raises(ValueError, match="Inadmissible Dixon-Coles parameters"):
+            build_score_matrix(lam=4.0, mu=4.0, rho=0.1)
 
 
 class TestTopScorelines:
@@ -163,12 +183,15 @@ class TestDixonColesFit:
         assert mu > 0
         assert isinstance(rho, float)
 
-    def test_unseen_team_defaults_to_league_median(self):
+    def test_unseen_team_raises_or_defaults_when_allowed(self):
         matches = generate_synthetic_matches()
         model = DixonColesModel(min_matches=15).fit(matches, xi=0.0065)
-        lam, mu, rho = model.predict("UNKNOWN_TEAM", "T01")
-        # alpha/beta for unseen team default to 0 -> lambda determined solely
-        # by opponent + home advantage + intercept
+        # By default (A04), unseen teams raise UnknownTeamError
+        with pytest.raises(UnknownTeamError):
+            model.predict("UNKNOWN_TEAM", "T01")
+
+        # When explicitly permitted, defaults to league median
+        lam, mu, rho = model.predict("UNKNOWN_TEAM", "T01", allow_unseen=True)
         expected_lam = np.exp(model.mu0_ + model.beta_["T01"] + model.gamma_)
         assert lam == pytest.approx(expected_lam)
 

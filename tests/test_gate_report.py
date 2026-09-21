@@ -58,6 +58,18 @@ class TestComputeGateDecision:
         assert decision["decision"] == GATE_PROCEED_SUBSET
         assert decision["leagues"] == ["SP1"]
 
+    def test_selection_worse_than_baseline_does_not_proceed(self):
+        """A06 regression: baseline CLV 10% (8-12%) vs flagged CLV 2% (1-3%) must NOT proceed."""
+        clv_by_league = {
+            "E0": {
+                "baseline": _clv(500, 0.10, 0.08, 0.12),
+                "flagged": _clv(100, 0.02, 0.01, 0.03),
+            }
+        }
+        decision = compute_gate_decision(clv_by_league)
+        assert decision["decision"] != GATE_PROCEED_SUBSET
+        assert decision["leagues"] == []
+
 
 class TestSummarizeExclusions:
     def test_counts_by_reason(self):

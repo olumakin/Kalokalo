@@ -28,7 +28,7 @@ class TestGetSupabaseClient:
     def test_explicit_credentials_used_over_env(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
-        with patch("supabase.create_client") as mock_create:
+        with patch("supabase.create_client", create=True) as mock_create:
             mock_create.return_value = MagicMock()
             get_supabase_client(url="https://explicit.example.supabase.co", key="explicit-key")
             mock_create.assert_called_once_with("https://explicit.example.supabase.co", "explicit-key")
@@ -36,7 +36,7 @@ class TestGetSupabaseClient:
     def test_falls_back_to_env_vars(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
-        with patch("supabase.create_client") as mock_create:
+        with patch("supabase.create_client", create=True) as mock_create:
             mock_create.return_value = MagicMock()
             get_supabase_client()
             mock_create.assert_called_once_with("https://env.example.supabase.co", "env-key")
@@ -44,7 +44,7 @@ class TestGetSupabaseClient:
     def test_client_construction_failure_returns_none_not_raise(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
-        with patch("supabase.create_client", side_effect=RuntimeError("boom")):
+        with patch("supabase.create_client", create=True, side_effect=RuntimeError("boom")):
             assert get_supabase_client() is None
 
 

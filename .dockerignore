@@ -9,3 +9,8 @@ tests
 data/historical/*.csv
 data/ledger.parquet
 data/ledger.csv
+.streamlit/secrets.toml
+.env*
+*.key
+*.pem
+secrets/

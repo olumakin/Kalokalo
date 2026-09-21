@@ -31,11 +31,14 @@ class Ledger:
         return pd.read_csv(self.path)
 
     def _write(self, df: pd.DataFrame) -> None:
+        """Atomic write using temporary file replacement to prevent corruption (A12)."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(f".tmp_{pd.Timestamp.now(tz='UTC').value}")
         if self.fmt == "parquet":
-            df.to_parquet(self.path, index=False)
+            df.to_parquet(tmp_path, index=False)
         else:
-            df.to_csv(self.path, index=False)
+            df.to_csv(tmp_path, index=False)
+        tmp_path.replace(self.path)
 
     def record_prediction(
         self,
@@ -54,7 +57,7 @@ class Ledger:
         and are filled in later via `update_outcome`."""
         df = self._read()
         row = {
-            "timestamp": timestamp or pd.Timestamp.utcnow(),
+            "timestamp": timestamp or pd.Timestamp.now(tz="UTC"),
             "match_id": match_id,
             "league": league,
             "home_team": home_team,
@@ -63,7 +66,7 @@ class Ledger:
             "market_p_draw": market_p_draw,
             "odds_draw": odds_draw,
             "ev": ev,
-            "stake_pct": stake_pct,
+            "stake_pct": float(stake_pct or 0.0),
             "actual_score": None,
             "clv": None,
             "pnl": None,
@@ -78,16 +81,26 @@ class Ledger:
         clv: float | None = None,
         pnl: float | None = None,
     ) -> None:
-        """Backfill the result of a previously recorded prediction."""
+        """Backfill the result of a previously recorded prediction.
+
+        Forecast-only records (stake_pct == 0) receive pnl = 0.0,
+        never phantom trading returns (A11).
+        """
         df = self._read()
         mask = df["match_id"] == match_id
         if not mask.any():
             raise KeyError(f"No ledger entry for match_id={match_id!r}")
+
         df.loc[mask, "actual_score"] = actual_score
         if clv is not None:
             df.loc[mask, "clv"] = clv
+
         if pnl is not None:
-            df.loc[mask, "pnl"] = pnl
+            # Only assign realized PnL to rows with positive stake (actual positions)
+            staked_mask = mask & (df["stake_pct"] > 0)
+            unstaked_mask = mask & (df["stake_pct"] <= 0)
+            df.loc[staked_mask, "pnl"] = pnl
+            df.loc[unstaked_mask, "pnl"] = 0.0
         self._write(df)
 
     def load(self) -> pd.DataFrame:

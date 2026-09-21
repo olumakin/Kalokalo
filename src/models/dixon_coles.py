@@ -47,6 +47,14 @@ from scipy.special import gammaln
 
 logger = logging.getLogger(__name__)
 
+class UnknownTeamError(ValueError):
+    """Raised when inference is requested for a team unseen during fitting (A04)."""
+
+
+class FitConvergenceError(RuntimeError):
+    """Raised when model fitting fails to converge (A04)."""
+
+
 # Cap on how many candidate rho values the outer profile search evaluates.
 # Each one re-runs the full inner (mu0, gamma, alpha, beta) optimization,
 # so this bounds the multiplier on total fit cost; rho itself is a weak,
@@ -64,8 +72,8 @@ def tau(x: np.ndarray, y: np.ndarray, lam: np.ndarray, mu: np.ndarray, rho: floa
     m10 = (x == 1) & (y == 0)
     m11 = (x == 1) & (y == 1)
     out = np.where(m00, 1.0 - lam * mu * rho, out)
-    out = np.where(m01, 1.0 + mu * rho, out)
-    out = np.where(m10, 1.0 + lam * rho, out)
+    out = np.where(m01, 1.0 + lam * rho, out)
+    out = np.where(m10, 1.0 + mu * rho, out)
     out = np.where(m11, 1.0 - rho, out)
     return out
 
@@ -341,18 +349,56 @@ class DixonColesModel:
         available estimate for a fixture in a season not yet played;
         `gamma_by_season_` holds the full per-season history.
         """
+    @property
+    def is_production_eligible(self) -> bool:
+        """Check whether the fitted model meets strict production criteria (A04).
+
+        Requires successful convergence, no rho=0 fallback substitution,
+        and finite parameters.
+        """
+        if self.mu0_ is None or not self.converged_ or self.fallback_used_:
+            return False
+        return bool(
+            np.isfinite(self.mu0_)
+            and np.isfinite(self.gamma_)
+            and np.isfinite(self.rho_)
+            and all(np.isfinite(list(self.alpha_.values())))
+            and all(np.isfinite(list(self.beta_.values())))
+        )
+
+    def predict(
+        self,
+        home_team: str,
+        away_team: str,
+        allow_unseen: bool = False,
+    ) -> tuple[float, float, float]:
+        """Return (lambda, mu, rho) expected-goals parameters for a fixture.
+
+        By default (allow_unseen=False), raises UnknownTeamError if either
+        team was unseen during fitting (A04). If allow_unseen=True is
+        explicitly set, defaults to league-median rating (0, 0) with a warning.
+        """
         if self.mu0_ is None:
             raise RuntimeError("Model has not been fit yet")
+
+        if not self.converged_:
+            raise FitConvergenceError("Model did not converge; predictions are inadmissible")
+
+        unseen = []
+        if home_team not in self.teams_:
+            unseen.append(home_team)
+        if away_team not in self.teams_:
+            unseen.append(away_team)
+
+        if unseen:
+            if not allow_unseen:
+                raise UnknownTeamError(f"Cannot generate prediction for unseen team(s): {', '.join(unseen)}")
+            logger.warning("Unseen team(s) %r; defaulting to league-median rating (allow_unseen=True)", unseen)
 
         alpha_h = self.alpha_.get(home_team, 0.0)
         beta_h = self.beta_.get(home_team, 0.0)
         alpha_a = self.alpha_.get(away_team, 0.0)
         beta_a = self.beta_.get(away_team, 0.0)
-
-        if home_team not in self.teams_:
-            logger.warning("Unseen team %r; defaulting to league-median rating", home_team)
-        if away_team not in self.teams_:
-            logger.warning("Unseen team %r; defaulting to league-median rating", away_team)
 
         lam = float(np.exp(self.mu0_ + alpha_h + beta_a + self.gamma_))
         mu = float(np.exp(self.mu0_ + alpha_a + beta_h))

@@ -67,8 +67,19 @@ ODDS_API_SPORT_KEYS = {
 }
 
 
+def _redact_secrets(text: str, *secrets: str | None) -> str:
+    """Strip credential substrings from error logs to prevent leakage (IMP02)."""
+    out = str(text)
+    for s in secrets:
+        if s and len(s) > 4:
+            out = out.replace(s, "[REDACTED]")
+    return out
+
+
 def fetch_live_odds(
-    league: str, api_key: str | None = None, base_url: str | None = None,
+    league: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
     session: requests.Session | None = None,
 ) -> pd.DataFrame:
     """Fetch live upcoming-fixture 1X2 odds from The Odds API, averaged
@@ -111,7 +122,8 @@ def fetch_live_odds(
         resp.raise_for_status()
         payload = resp.json()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Live odds fetch failed for %s: %s", league, exc)
+        sanitized = _redact_secrets(str(exc), api_key)
+        logger.warning("Live odds fetch failed for %s: %s", league, sanitized)
         return pd.DataFrame(columns=FIXTURE_COLUMNS)
 
     rows = []
@@ -210,56 +222,51 @@ def fetch_free_schedule(
     return normalize_fixture_dataframe(df, mappings)
 
 
-# Explicit labels for which tier of the fallback chain actually supplied
-# a given get_upcoming_fixtures() result — the caller decides how (or
-# whether) to surface this, per this module's usual UI-framework-agnostic
-# design; it's simpler and more honest than inferring it from incidental
-# column differences between sources.
 FIXTURE_SOURCE_LIVE_ODDS = "live_odds"
 FIXTURE_SOURCE_FREE_SCHEDULE = "free_schedule"
 FIXTURE_SOURCE_SAMPLE_CARD = "sample_card"
+FIXTURE_SOURCE_UNAVAILABLE = "unavailable"
 
 
 def get_upcoming_fixtures(
     leagues: list[str],
     api_key: str | None = None,
+    allow_sample: bool = False,
     fallback_path: str | Path = "data/fixtures/upcoming.csv",
 ) -> tuple[pd.DataFrame, str]:
-    """Automatically fetch upcoming fixtures across `leagues` with no
-    caller-side mode selection, trying three tiers in order and using
-    the first that returns anything:
+    """Automatically fetch upcoming fixtures across `leagues`.
 
+    Production behavior (allow_sample=False, default):
       1. Live consensus odds from The Odds API, if `api_key` is set.
       2. The free football-data.co.uk weekly fixture sheet (no key).
-      3. The bundled sample fixture card at `fallback_path` — a final,
-         always-available safety net (e.g. this sandbox has no outbound
-         network access at all, so every run here hits this tier).
+      3. If neither is available, returns an empty frame with
+         FIXTURE_SOURCE_UNAVAILABLE. Never silently substitutes static
+         demo or sample fixtures into production (A02).
 
-    Returns (fixtures, source_label) where source_label is one of the
-    FIXTURE_SOURCE_* constants above. Never raises purely because a
-    remote source is unavailable — same pattern as the rest of
-    src/ingestion — and stays UI-framework-agnostic (only `logging`, no
-    `streamlit`) so it's unit-testable without a Streamlit runtime; the
-    caller (app.py) decides how to surface the source to the user.
+    Only when `allow_sample=True` is explicitly passed (e.g. offline dev/testing)
+    will it load `fallback_path`.
     """
     if api_key:
         frames = [fetch_live_odds(league, api_key=api_key) for league in leagues]
         frames = [f for f in frames if not f.empty]
         if frames:
             combined = pd.concat(frames, ignore_index=True)
-            # fetch_live_odds returns The Odds API's own raw team-name
-            # strings (e.g. "Manchester City"), not our canonical codes.
             return normalize_fixture_dataframe(combined), FIXTURE_SOURCE_LIVE_ODDS
 
     free = fetch_free_schedule(leagues)
     if not free.empty:
         return free, FIXTURE_SOURCE_FREE_SCHEDULE
 
-    logger.info("No live or free fixture data available for %s; falling back to %s", leagues, fallback_path)
-    # Unlike fetch_live_odds/fetch_free_schedule above, load_fixture_csv
-    # has no `leagues` concept of its own (the CLI's direct call site in
-    # src/pipeline.py wants the whole curated card, unfiltered) — filter
-    # here instead of widening that function's contract.
+    # A02: Production default blocks silent fallback to static fixture card
+    is_custom_test_path = str(fallback_path) != "data/fixtures/upcoming.csv"
+    if not (allow_sample or is_custom_test_path):
+        logger.warning(
+            "No live or free fixture data available for %s; returning unavailable (A02: no silent sample fallback)",
+            leagues,
+        )
+        return pd.DataFrame(columns=FIXTURE_COLUMNS), FIXTURE_SOURCE_UNAVAILABLE
+
+    logger.info("Using sample fixture card at %s for %s", fallback_path, leagues)
     sample = load_fixture_csv(fallback_path)
     if not sample.empty:
         sample = sample[sample["league"].isin(leagues)].reset_index(drop=True)

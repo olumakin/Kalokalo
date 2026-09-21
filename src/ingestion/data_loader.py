@@ -23,6 +23,7 @@ market comparisons.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 # Ordered by trustworthiness as a fair draw price, most preferred first:
@@ -123,8 +124,21 @@ def validate_matches(df: pd.DataFrame, min_valid_odds: float = 1.01) -> tuple[pd
 
     core_cols = ["date", "home_team", "away_team", "home_goals", "away_goals"]
     missing_core = out[core_cols].isna().any(axis=1)
+
+    # Check for blank or whitespace team names (A13)
+    blank_teams = (
+        out["home_team"].astype(str).str.strip().isin(["", "None", "nan", "UNK"])
+        | out["away_team"].astype(str).str.strip().isin(["", "None", "nan", "UNK"])
+    )
+
+    # Check for non-finite or negative goals (A13)
+    non_finite_goals = (
+        ~np.isfinite(pd.to_numeric(out["home_goals"], errors="coerce"))
+        | ~np.isfinite(pd.to_numeric(out["away_goals"], errors="coerce"))
+    )
     negative_goals = (out["home_goals"].fillna(0) < 0) | (out["away_goals"].fillna(0) < 0)
-    drop_core = missing_core | negative_goals
+
+    drop_core = missing_core | blank_teams | non_finite_goals | negative_goals
     report["dropped_missing_core"] = int(drop_core.sum())
     out = out[~drop_core]
 
@@ -140,8 +154,14 @@ def validate_matches(df: pd.DataFrame, min_valid_odds: float = 1.01) -> tuple[pd
     odds_cols = ["odds_home", "odds_draw", "odds_away"]
     if set(odds_cols).issubset(out.columns):
         has_odds = out[odds_cols].notna().all(axis=1)
+        numeric_odds_valid = (
+            np.isfinite(pd.to_numeric(out["odds_home"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(out["odds_draw"], errors="coerce"))
+            & np.isfinite(pd.to_numeric(out["odds_away"], errors="coerce"))
+        )
         implausible = has_odds & (
-            (out["odds_home"] <= min_valid_odds)
+            ~numeric_odds_valid
+            | (out["odds_home"] <= min_valid_odds)
             | (out["odds_draw"] <= min_valid_odds)
             | (out["odds_away"] <= min_valid_odds)
         )

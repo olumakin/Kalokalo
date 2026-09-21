@@ -7,6 +7,7 @@ venv/
 
 # Cached raw data / generated ledger — regenerable, not source
 data/historical/*.csv
+data/cache/
 data/ledger.parquet
 data/ledger.csv
 

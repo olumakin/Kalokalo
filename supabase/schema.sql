@@ -30,7 +30,13 @@ CREATE TABLE predictions (
     odds_entry NUMERIC,
     price_source TEXT,
     ev_entry NUMERIC,
-    UNIQUE (fixture_id, model_version, run_id)
+    UNIQUE (fixture_id, model_version, run_id),
+    CONSTRAINT chk_probs CHECK (
+        (p_home IS NULL OR (p_home >= 0 AND p_home <= 1)) AND
+        (p_draw IS NULL OR (p_draw >= 0 AND p_draw <= 1)) AND
+        (p_away IS NULL OR (p_away >= 0 AND p_away <= 1))
+    ),
+    CONSTRAINT chk_odds CHECK (odds_entry IS NULL OR odds_entry > 1.0)
 );
 
 -- Separate settlements table (append-only; never mutates `predictions`).
@@ -39,14 +45,17 @@ CREATE TABLE settlements (
     fixture_id TEXT NOT NULL,
     odds_close NUMERIC,
     actual_result TEXT,
-    settled_at TIMESTAMPTZ DEFAULT NOW()
+    settled_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT chk_settle_odds CHECK (odds_close IS NULL OR odds_close > 1.0)
 );
 
--- Enforce append-only access for the anon (publishable) key.
+-- Enforce security and least privilege (A07):
+-- Reads are allowed for authenticated and anon users.
+-- Writes require authenticated sessions or backend service_role (preventing anonymous record forging).
 ALTER TABLE predictions ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Allow anon insert" ON predictions FOR INSERT TO anon WITH CHECK (true);
-CREATE POLICY "Allow anon select" ON predictions FOR SELECT TO anon USING (true);
+CREATE POLICY "Allow read predictions" ON predictions FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Allow write predictions" ON predictions FOR INSERT TO authenticated, service_role WITH CHECK (true);
 
 ALTER TABLE settlements ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Allow anon insert" ON settlements FOR INSERT TO anon WITH CHECK (true);
-CREATE POLICY "Allow anon select" ON settlements FOR SELECT TO anon USING (true);
+CREATE POLICY "Allow read settlements" ON settlements FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Allow write settlements" ON settlements FOR INSERT TO authenticated, service_role WITH CHECK (true);

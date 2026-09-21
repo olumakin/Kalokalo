@@ -17,78 +17,48 @@ from datetime import date
 import pandas as pd
 import yaml
 
-from src.analytics.devig import devig
-from src.analytics.edge import apply_risk_caps, calculate_ev, kelly_fraction, qualifies
+from src.config import AppConfig, get_config
+from src.engine import DomainPredictionEngine
 from src.ingestion.data_loader import validate_matches
 from src.ingestion.historical import load_all, load_settings, season_codes
 from src.ingestion.normalizer import normalize_dataframe
 from src.ingestion.odds_feed import load_fixture_csv
 from src.models.dixon_coles import DixonColesModel
-from src.models.simulator import match_probabilities, top_scorelines
 from src.tracking.ledger import Ledger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: dict) -> pd.DataFrame:
-    edge_cfg = settings["edge"]
-    devig_method = settings["devig"]["method"]
+def _resolve_app_config(settings: dict | None = None) -> AppConfig:
+    """Resolve AppConfig, merging partial dict overrides with default config if needed."""
+    if settings is None:
+        return get_config()
+    try:
+        return AppConfig.model_validate(settings)
+    except Exception:
+        base = get_config().model_dump()
+        for k, v in settings.items():
+            if isinstance(v, dict) and k in base and isinstance(base[k], dict):
+                base[k].update(v)
+            else:
+                base[k] = v
+        return AppConfig.model_validate(base)
 
-    rows = []
-    for _, row in fixtures.iterrows():
-        lam, mu, rho = model.predict(row["home_team"], row["away_team"])
-        probs = match_probabilities(lam, mu, rho)
-        model_p_draw = probs["p_draw"]
-        (h1, a1, p1), (h2, a2, p2) = top_scorelines(probs["matrix"], n=2)
 
-        market_h, market_d, market_a = devig(
-            row["odds_home"], row["odds_draw"], row["odds_away"], method=devig_method
-        )
-        ev = calculate_ev(model_p_draw, row["odds_draw"])
-        qualified = qualifies(model_p_draw, market_d, ev, min_ev=edge_cfg["min_ev"])
-        f_kelly = kelly_fraction(model_p_draw, row["odds_draw"], c=edge_cfg["kelly_fraction"]) if qualified else 0.0
+def build_predictions(
+    fixtures: pd.DataFrame,
+    model: DixonColesModel | dict[str, DixonColesModel],
+    settings: dict | None = None,
+) -> pd.DataFrame:
+    """Score upcoming fixtures by delegating to the single authoritative DomainPredictionEngine (M01)."""
+    if fixtures.empty:
+        return pd.DataFrame()
 
-        match_id = f"{row['date'].date()}_{row['league']}_{row['home_team']}_{row['away_team']}"
-        rows.append({
-            "match_id": match_id,
-            "date": row["date"],
-            "league": row["league"],
-            "home_team": row["home_team"],
-            "away_team": row["away_team"],
-            "xg_home": lam,
-            "xg_away": mu,
-            "model_p_home": probs["p_home"],
-            "model_p_draw": model_p_draw,
-            "model_p_away": probs["p_away"],
-            "top_score": f"{h1}-{a1}",
-            "top_score_prob": p1,
-            "alt_score": f"{h2}-{a2}",
-            "alt_score_prob": p2,
-            "market_p_draw": market_d,
-            "odds_draw": row["odds_draw"],
-            "ev": ev,
-            "qualified": qualified,
-            "kelly_raw": f_kelly,
-        })
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-
-    # Apply dual-layer risk caps per calendar day, across qualified bets only.
-    df["stake_pct"] = 0.0
-    for match_date, day_df in df[df["qualified"]].groupby(df["date"].dt.date):
-        stakes = {r["match_id"]: r["kelly_raw"] for _, r in day_df.iterrows()}
-        capped = apply_risk_caps(
-            stakes,
-            single_match_cap=settings["edge"]["single_match_cap"],
-            daily_slate_cap=settings["edge"]["daily_slate_cap"],
-        )
-        for match_id, stake in capped.items():
-            df.loc[df["match_id"] == match_id, "stake_pct"] = stake
-
-    return df.sort_values("ev", ascending=False).reset_index(drop=True)
+    models_dict = model if isinstance(model, dict) else {lg: model for lg in fixtures["league"].unique()}
+    cfg = _resolve_app_config(settings)
+    engine = DomainPredictionEngine(config=cfg)
+    return engine.predict_slate(fixtures, models_dict)
 
 
 def load_historical_matches(leagues: list[str], seasons_back: int, settings: dict) -> pd.DataFrame:
@@ -107,27 +77,33 @@ def load_historical_matches(leagues: list[str], seasons_back: int, settings: dic
     return matches
 
 
-def fit_model(
-    matches: pd.DataFrame, settings: dict, goal_columns: tuple[str, str] = ("home_goals", "away_goals"),
-) -> DixonColesModel:
-    """Fit the Dixon-Coles model on a canonical-schema match history.
+def fit_models_by_league(
+    matches: pd.DataFrame,
+    settings: dict | None = None,
+    goal_columns: tuple[str, str] = ("home_goals", "away_goals"),
+) -> dict[str, DixonColesModel]:
+    """Fit one independent Dixon-Coles model per league delegating to DomainPredictionEngine (M01)."""
+    cfg = _resolve_app_config(settings)
+    engine = DomainPredictionEngine(config=cfg)
+    return engine.fit_leagues(matches, goal_columns=goal_columns)
 
-    `goal_columns` defaults to actual goals; pass ("home_xg", "away_xg")
-    to fit on blended xG instead (src/ingestion/sources.py) — see
-    DixonColesModel.fit's docstring for the caveats of doing so.
-    """
-    model_cfg = settings["model"]
-    model = DixonColesModel(
-        min_matches=model_cfg["min_matches_for_team_rating"],
-        max_iter=model_cfg["max_optimizer_iterations"],
-        method=model_cfg["optimizer_method"],
-        rho_init=model_cfg["rho_init"],
-    ).fit(matches, xi=model_cfg["xi_decay"], goal_columns=goal_columns)
-    logger.info(
-        "Model fit: mu0=%.4f gamma=%.4f rho=%.4f converged=%s fallback_used=%s teams=%d",
-        model.mu0_, model.gamma_, model.rho_, model.converged_, model.fallback_used_, len(model.teams_),
-    )
-    return model
+
+def fit_model(
+    matches: pd.DataFrame,
+    settings: dict | None = None,
+    goal_columns: tuple[str, str] = ("home_goals", "away_goals"),
+) -> DixonColesModel:
+    """Fit single Dixon-Coles model delegating to DomainPredictionEngine settings (M01)."""
+    cfg = _resolve_app_config(settings)
+    engine = DomainPredictionEngine(config=cfg)
+    m_cfg = engine.config.model
+    return DixonColesModel(
+        min_matches=m_cfg.min_matches_for_team_rating,
+        max_iter=m_cfg.max_optimizer_iterations,
+        method=m_cfg.optimizer_method,
+        rho_init=m_cfg.rho_init,
+    ).fit(matches, xi=m_cfg.xi_decay, goal_columns=goal_columns)
+
 
 
 def record_ledger(predictions: pd.DataFrame, settings: dict) -> None:
@@ -145,7 +121,7 @@ def record_ledger(predictions: pd.DataFrame, settings: dict) -> None:
             odds_draw=row["odds_draw"],
             ev=row["ev"],
             stake_pct=row["stake_pct"],
-            timestamp=pd.Timestamp.utcnow(),
+            timestamp=pd.Timestamp.now(tz="UTC"),
         )
 
 
@@ -158,14 +134,14 @@ def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path
         logger.error("No historical matches available; cannot fit model. Populate data/historical/ or check network access.")
         return pd.DataFrame()
 
-    model = fit_model(matches, settings)
+    models = fit_models_by_league(matches, settings)
 
     fixtures = load_fixture_csv(fixtures_path)
     if fixtures.empty:
         logger.warning("No fixtures loaded from %s", fixtures_path)
         return pd.DataFrame()
 
-    predictions = build_predictions(fixtures, model, settings)
+    predictions = build_predictions(fixtures, models, settings)
     record_ledger(predictions, settings)
     return predictions
 

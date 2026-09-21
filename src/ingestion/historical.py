@@ -7,6 +7,7 @@ it already has, and so tests / offline runs can operate on cached data.
 """
 from __future__ import annotations
 
+from datetime import date
 import logging
 from pathlib import Path
 
@@ -52,27 +53,66 @@ def download_league_season(
     base_url: str,
     session: requests.Session | None = None,
     force: bool = False,
+    max_age_hours: int = 24,
 ) -> pd.DataFrame | None:
-    """Fetch one league/season CSV, using the on-disk cache when present.
+    """Fetch one league/season CSV, validating content before caching (IMP03).
 
-    Returns None (with a logged warning) if the data cannot be obtained,
-    rather than raising, so a pipeline run can proceed with partial data.
+    For active seasons, automatically refreshes if the cache file is older
+    than `max_age_hours` (A08).
     """
+    import io
+    import time
+
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{league}_{season}.csv"
 
+    # Check freshness (A08): if file exists, check if it's the current season and expired
     if cache_path.exists() and not force:
-        return pd.read_csv(cache_path)
+        file_age_hours = (time.time() - cache_path.stat().st_mtime) / 3600.0
+        # Determine if this is an active current/recent season
+        current_year = date.today().year
+        current_season_code = f"{str(current_year)[-2:]}{str(current_year + 1)[-2:]}"
+        prev_season_code = f"{str(current_year - 1)[-2:]}{str(current_year)[-2:]}"
+        is_active = season in (current_season_code, prev_season_code)
+
+        if not is_active or file_age_hours < max_age_hours:
+            try:
+                return pd.read_csv(cache_path)
+            except Exception as exc:
+                logger.warning("Cached file %s is corrupt (%s); re-downloading", cache_path, exc)
 
     url = base_url.format(season=season, league=league)
     try:
         sess = session or requests
         resp = sess.get(url, timeout=20)
         resp.raise_for_status()
-        cache_path.write_bytes(resp.content)
-        return pd.read_csv(cache_path)
-    except Exception as exc:  # noqa: BLE001 - network/parse errors are all "unavailable"
+
+        # Validate in-memory before writing to disk (IMP03)
+        content = resp.content
+        if not content or len(content) < 50:
+            logger.warning("Empty or truncated response from %s for %s %s", url, league, season)
+            return None
+
+        # Verify it can be parsed as CSV with basic match columns
+        df = pd.read_csv(io.BytesIO(content))
+        required = {"Date", "HomeTeam", "AwayTeam"}
+        if not required.issubset(df.columns):
+            logger.warning("Downloaded content from %s lacks required columns %s; not caching", url, required)
+            return None
+
+        # Content is valid, commit to cache atomically
+        temp_path = cache_path.with_suffix(".tmp")
+        temp_path.write_bytes(content)
+        temp_path.replace(cache_path)
+        return df
+    except Exception as exc:  # noqa: BLE001
         logger.warning("Could not download %s %s: %s", league, season, exc)
+        if cache_path.exists():
+            try:
+                logger.info("Falling back to existing cache for %s %s", league, season)
+                return pd.read_csv(cache_path)
+            except Exception:
+                pass
         return None
 
 
@@ -108,3 +148,50 @@ def load_all(
         return pd.DataFrame(columns=RAW_COLUMNS + ["league", "season"])
 
     return pd.concat(frames, ignore_index=True)
+
+
+def assemble_historical_evaluation_dataset(
+    leagues: list[str],
+    seasons: list[str],
+    cache_dir: str | Path = "data/historical",
+    base_url: str | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Assemble canonical historical evaluation dataset across leagues and seasons (A10).
+
+    Downloads/loads raw CSVs, extracts distinct entry and close pricing legs via
+    normalize_evaluation_dataframe, runs strict match validation, and aggregates
+    missing-price stats and data provenance for the gate harness.
+    """
+    from src.ingestion.data_loader import validate_matches
+    from src.ingestion.normalizer import EVALUATION_COLUMNS, normalize_evaluation_dataframe
+
+    raw_df = load_all(leagues=leagues, seasons=seasons, cache_dir=cache_dir, base_url=base_url)
+    if raw_df.empty:
+        return pd.DataFrame(columns=EVALUATION_COLUMNS), {
+            "total_raw_rows": 0,
+            "valid_matches": 0,
+            "missing_entry_count": 0,
+            "missing_close_count": 0,
+            "missing_retail_count": 0,
+            "fully_priced_count": 0,
+        }
+
+    norm_df, norm_report = normalize_evaluation_dataframe(raw_df)
+    clean_df, val_report = validate_matches(norm_df)
+
+    if not clean_df.empty:
+        if clean_df["date"].dt.tz is None:
+            clean_df["date"] = clean_df["date"].dt.tz_localize("UTC")
+        else:
+            clean_df["date"] = clean_df["date"].dt.tz_convert("UTC")
+
+    manifest = {
+        "leagues": leagues,
+        "seasons": seasons,
+        "total_raw_rows": len(raw_df),
+        "normalized_rows": len(norm_df),
+        "clean_rows": len(clean_df),
+        "validation_report": val_report,
+        "missing_price_report": norm_report,
+    }
+    return clean_df, manifest

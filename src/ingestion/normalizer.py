@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.ingestion.data_loader import select_match_odds
+from src.ingestion.data_loader import select_entry_close_odds, select_match_odds
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,12 @@ CANONICAL_COLUMNS = [
     "date", "league", "season", "home_team", "away_team",
     "home_goals", "away_goals", "result",
     "odds_home", "odds_draw", "odds_away", "price_source",
+]
+
+EVALUATION_COLUMNS = CANONICAL_COLUMNS + [
+    "entry_home", "entry_draw", "entry_away", "entry_source",
+    "close_home", "close_draw", "close_away", "close_source",
+    "retail_draw",
 ]
 
 
@@ -115,3 +121,75 @@ def normalize_dataframe(raw: pd.DataFrame, mappings: dict | None = None) -> pd.D
 
     out = df[CANONICAL_COLUMNS].sort_values("date").reset_index(drop=True)
     return out
+
+
+def normalize_evaluation_dataframe(raw: pd.DataFrame, mappings: dict | None = None) -> tuple[pd.DataFrame, dict]:
+    """Convert raw football-data.co.uk rows into the evaluation schema (A10).
+
+    Preserves both canonical odds and explicit opening, closing, and retail
+    price legs (entry_*, close_*, retail_draw) via select_entry_close_odds.
+    Counts missing-price reasons for auditing and returns (df, report).
+    Guarantees date is datetime64[ns, UTC].
+    """
+    empty_report = {
+        "input_rows": len(raw),
+        "valid_rows": 0,
+        "missing_entry_count": 0,
+        "missing_close_count": 0,
+        "missing_retail_count": 0,
+        "fully_priced_count": 0,
+    }
+    if raw.empty:
+        return pd.DataFrame(columns=EVALUATION_COLUMNS), empty_report
+
+    mappings = mappings or load_team_mappings()
+    df = raw.copy()
+
+    df["date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    df = df.dropna(subset=["date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
+    if df.empty:
+        return pd.DataFrame(columns=EVALUATION_COLUMNS), empty_report
+
+    # Ensure UTC timezone
+    if df["date"].dt.tz is None:
+        df["date"] = df["date"].dt.tz_localize("UTC")
+    else:
+        df["date"] = df["date"].dt.tz_convert("UTC")
+
+    df["home_team"] = df.apply(lambda r: resolve_team(r["HomeTeam"], r["league"], mappings), axis=1)
+    df["away_team"] = df.apply(lambda r: resolve_team(r["AwayTeam"], r["league"], mappings), axis=1)
+
+    df["home_goals"] = df["FTHG"].astype(int)
+    df["away_goals"] = df["FTAG"].astype(int)
+    df["result"] = df["FTR"] if "FTR" in df.columns else df.apply(
+        lambda r: "H" if r["home_goals"] > r["away_goals"] else ("A" if r["home_goals"] < r["away_goals"] else "D"),
+        axis=1,
+    )
+
+    # 1. Canonical match odds (best available)
+    canonical_odds = df.apply(select_match_odds, axis=1, result_type="expand")
+    canonical_odds.columns = ["odds_home", "odds_draw", "odds_away", "price_source"]
+    df[["odds_home", "odds_draw", "odds_away", "price_source"]] = canonical_odds
+
+    # 2. Distinct entry and close legs for evaluation (A10)
+    eval_odds = df.apply(select_entry_close_odds, axis=1, result_type="expand")
+    for col in eval_odds.columns:
+        df[col] = eval_odds[col]
+
+    # Calculate missing-price reasons
+    missing_entry = df["entry_draw"].isna()
+    missing_close = df["close_draw"].isna()
+    missing_retail = df["retail_draw"].isna()
+    fully_priced = (~missing_entry) & (~missing_close) & (~missing_retail)
+
+    report = {
+        "input_rows": len(raw),
+        "valid_rows": len(df),
+        "missing_entry_count": int(missing_entry.sum()),
+        "missing_close_count": int(missing_close.sum()),
+        "missing_retail_count": int(missing_retail.sum()),
+        "fully_priced_count": int(fully_priced.sum()),
+    }
+
+    out = df[EVALUATION_COLUMNS].sort_values("date").reset_index(drop=True)
+    return out, report

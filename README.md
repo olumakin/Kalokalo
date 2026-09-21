@@ -1,5 +1,13 @@
 # Draw Value Prediction Engine (DVPE) — Football Big 5
 
+Implementation planning: the [prioritized task index](tasks/todo.md) links all **58 detailed tasks** with [scope, dependencies, acceptance criteria, and quality gates](tasks/detailed-backlog.md). All tasks remain open; no implementation or release approval is implied.
+
+See the [complete review index](docs/README.md) for all engine, UI/UX, and [improvement/enhancement findings](docs/improvements-2026-09-20.md), ordered by priority and linked to the [shared backlog](tasks/todo.md). Recommendations are documented only, not implemented.
+
+> **Audit update — 2026-09-20:** The current implementation contains production-reachable synthetic/static data and fallback paths, mathematical defects, and incomplete evidence gates. Earlier completion/readiness statements below describe development history, not verified production readiness. See the [prioritized audit](docs/audit-2026-09-20.md) and [proposed frontend/backend migration](docs/frontend-backend-migration.md). This audit changed documentation only; findings remain open.
+
+Audit documentation: [engine/data findings — A01–A20](docs/audit-2026-09-20.md), [UI/UX findings — UX01–UX12](docs/ui-ux-audit-2026-09-20.md), [architecture migration](docs/frontend-backend-migration.md), and [prioritized backlog](tasks/todo.md). Findings remain open; documenting them does not mark them fixed.
+
 Automated quantitative pipeline that identifies mispriced draw outcomes
 across the top five European football leagues (EPL, La Liga, Serie A,
 Bundesliga, Ligue 1). Compares a time-decayed Dixon-Coles bivariate

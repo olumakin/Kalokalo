@@ -52,3 +52,13 @@ class TestNormalizeDataframe:
         assert list(out.columns) == CANONICAL_COLUMNS
         row = out.iloc[0]
         assert (row["home_goals"], row["away_goals"], row["result"]) == (2, 1, "H")
+
+    def test_monza_and_monaco_have_distinct_canonical_codes(self):
+        """A03 regression: Monza (I1) and Monaco (F1) must have distinct canonical codes."""
+        from src.ingestion.normalizer import load_team_mappings, resolve_team
+        mappings = load_team_mappings()
+        monza_code = resolve_team("Monza", "I1", mappings)
+        monaco_code = resolve_team("Monaco", "F1", mappings)
+        assert monza_code != monaco_code
+        assert monza_code == "MNZ"
+        assert monaco_code == "MON"

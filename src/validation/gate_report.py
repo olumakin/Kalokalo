@@ -34,7 +34,7 @@ def compute_gate_decision(clv_by_league: dict[str, dict]) -> dict:
         clearing it — more data needed, not a verdict either way).
     """
     evaluable = {
-        lg: d["flagged"] for lg, d in clv_by_league.items()
+        lg: d for lg, d in clv_by_league.items()
         if not d["flagged"]["insufficient_sample"]
     }
     if not evaluable:
@@ -44,18 +44,30 @@ def compute_gate_decision(clv_by_league: dict[str, dict]) -> dict:
             "leagues": [],
         }
 
-    proceed_leagues = sorted(lg for lg, f in evaluable.items() if f["ci_lo"] > 0)
+    proceed_leagues = []
+    for lg, d in evaluable.items():
+        f = d["flagged"]
+        b = d["baseline"]
+        # Gate rule (A06): must have strictly positive lower bound AND exceed baseline CLV
+        if f["ci_lo"] > 0 and f["mean_clv"] > b["mean_clv"]:
+            proceed_leagues.append(lg)
+
+    proceed_leagues = sorted(proceed_leagues)
     if proceed_leagues:
         return {
             "decision": GATE_PROCEED_SUBSET,
-            "reason": f"lower CLV bound above 0 in: {', '.join(proceed_leagues)}",
+            "reason": f"lower CLV bound > 0 and beats baseline in: {', '.join(proceed_leagues)}",
             "leagues": proceed_leagues,
         }
 
-    if all(f["ci_hi"] <= 0 for f in evaluable.values()):
+    all_underperforming = all(
+        d["flagged"]["ci_hi"] <= 0 or d["flagged"]["mean_clv"] <= d["baseline"]["mean_clv"]
+        for d in evaluable.values()
+    )
+    if all_underperforming:
         return {
             "decision": GATE_REPOSITION,
-            "reason": "upper CLV bound at or below 0 in every evaluable league",
+            "reason": "no evaluable league demonstrates statistically positive edge above baseline",
             "leagues": [],
         }
 
