@@ -55,6 +55,18 @@ class LedgerConfig(BaseModel):
     format: Literal["parquet", "csv"] = "parquet"
 
 
+class ExecutionConfig(BaseModel):
+    execution_price_source: str = "NAMED_OBSERVABLE_BOOKMAKER"
+    benchmark_price_role: str = "REFERENCE_INFORMATION_FILTER_ONLY"
+    allow_benchmark_fallback: bool = False
+    max_execution_quote_age_seconds: int = Field(default=900, ge=10, le=86400)
+    decision_lead_time_seconds: int = Field(default=3600, ge=60, le=86400)
+    market_type: str = "1X2"
+    selection: str = "DRAW"
+    execution_mode: str = "PAPER_AT_OBSERVED_NAMED_QUOTE"
+    market_relative_filter_policy: str = "MODEL_DRAW_PROB_EXCEEDS_BENCHMARK_DEVIGGED"
+
+
 class AppConfig(BaseModel):
     leagues: dict[str, str]
     data_source: DataSourceConfig
@@ -62,6 +74,7 @@ class AppConfig(BaseModel):
     devig: DevigConfig
     edge: EdgeConfig
     ledger: LedgerConfig
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 
 
 _RESOLVED_CONFIG: AppConfig | None = None

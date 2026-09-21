@@ -113,3 +113,56 @@ Every observation binds to the cryptographic identity triad:
 
 ### 4.4 Fixture Join Invariant
 * Forecast predictions and market benchmark snapshots join **exclusively** on Stage 2 `internal_fixture_id`. Human-readable labels, team display formatting, and mutable date strings are strictly prohibited as join keys.
+
+---
+
+## 5. Implemented Stage 4 Contracts: Named Execution Feed & Paper Decision Daemon
+
+### 5.1 Architecture & Economic Separation (A09)
+Stage 4 implements the A09 decision-semantic correction separating three distinct price and evaluation concepts:
+1. **Market Benchmark Quote (`is_executable_price = False`)**: Captured by `MarketBenchmarkDaemon` under `MarketBenchmarkContract::v1.0`. Consensus/reference odds used exclusively for the information filter:
+   $$\text{model\_p\_draw} > \text{benchmark\_market\_p\_draw}$$
+2. **Available Execution Quote (`is_executable_price = True`)**: Captured by `ExecutionQuoteDaemon` under `ExecutionQuoteContract::v1.0`. Observable, named bookmaker prices used exclusively for executable EV and position sizing:
+   $$\text{EV} = (\text{model\_p\_draw} \times \text{execution\_decimal\_odds}) - 1 \ge \text{min\_ev}\;(+0.03)$$
+3. **Closing Reference Quote**: Reserved for Stage 5. Zero closing-line evaluation, zero CLV calculations, and zero settlement records are generated in Stage 4.
+4. **Strict Zero-Fallback Policy**: If an observable named execution quote is absent, invalid, or stale, the decision fails closed (`NO_EXECUTION_QUOTE` or explicit error code) and yields `constrained_paper_stake_fraction = 0.0`. Under no circumstances may consensus benchmark odds be substituted into execution fields.
+
+### 5.2 Named Execution Feed (`ExecutionQuoteContract::v1.0`)
+* **Authoritative Implementation**: `src/ingestion/execution_feed.py`.
+* **Named Bookmaker Requirement**: Only verifiable, named bookmakers (e.g. `Bet365`, `Pinnacle`, `WilliamHill`) are eligible. All consensus, median, average, synthetic, composite, or anonymous sources are rejected fail-closed with `EXECUTION_SOURCE_NOT_NAMED`.
+* **Timestamp Provenance**:
+  * Provider quote timestamp (`provider_quote_timestamp_utc`) is required. Absence marks quote as `UNKNOWN` and rejects execution eligibility (`EXECUTION_QUOTE_TIMESTAMP_UNKNOWN`).
+  * Ingestion timestamp is strictly separated and never substituted for quote timestamp.
+* **Freshness & Causal Order Invariants**:
+  * Quote age must satisfy:
+    $$t_{\text{ingest}} - t_{\text{provider\_quote}} \le \text{max\_quote\_age\_seconds}\;(900\text{s})$$
+    Quotes exceeding the freshness limit fail with `EXECUTION_QUOTE_STALE`.
+  * Clock anomaly protection rejects quotes with $>120\text{s}$ future skew (`EXECUTION_QUOTE_FUTURE_TIMESTAMP`).
+  * Pre-match execution timing rejects quotes timestamped after a known actual kickoff (`EXECUTION_QUOTE_POST_KICKOFF`).
+* **Odds Validity**: Decimal odds must strictly satisfy $\text{odds} > 1.0$, non-NaN, and finite (`EXECUTION_ODDS_INVALID`).
+* **Authoritative Persistence**: Captured snapshots are persisted as append-only `EventType.EXECUTION_QUOTE_SNAPSHOT` in the Stage 1 store with deterministic SHA-256 idempotency keys.
+
+### 5.3 Paper Decision Daemon (`PaperDecisionContract::v1.0`)
+* **Authoritative Implementation**: `src/workers/decision_daemon.py`.
+* **Frozen Decision Input Triad**: Binds:
+  1. Authoritative Stage 2 fixture projection (`FixtureStateProjection`).
+  2. Stage 3 frozen model prediction record (`EventType.PREDICTION_CAPTURE_SUCCESS`), including `model_fit_identity` and `training_data_identity`.
+  3. Stage 3 market benchmark snapshot (`EventType.MARKET_BENCHMARK_SNAPSHOT`) for information filtering.
+  4. Stage 4 named execution quote snapshot (`EventType.EXECUTION_QUOTE_SNAPSHOT`) for EV and sizing.
+* **Timing & Lifecycle Gating**:
+  * Pre-match cutoff: $t_{\text{decision}} < t_{\text{kickoff\_sched}} - \text{decision\_lead\_time}$ (rejected fail-closed as `POST_CUTOFF_DECISION_ATTEMPT` at or after cutoff).
+  * Lifecycle state: Fixture must be in `SCHEDULED` or `RESCHEDULED` state. Ineligible states (`POSTPONED`, `STARTED`, `COMPLETED`, `VOIDED`) disqualify the decision fail-closed.
+  * Causal timeline: Quote and forecast timestamps must strictly precede or equal decision timestamp:
+    $$t_{\text{quote\_provider}} \le t_{\text{quote\_ingest}} \le t_{\text{decision}} < t_{\text{cutoff}}$$
+* **Position Sizing & Dual-Layer Exposure Capping**:
+  * **Fractional Kelly**: Evaluated on execution price with fixed multiplier $c = 0.15$:
+    $$f^* = 0.15 \times \frac{b \cdot p - q}{b},\quad b = \text{odds}_{\text{exec}} - 1,\quad p = \text{model\_p\_draw},\quad q = 1 - p$$
+  * **Single-Match Cap**: Stake fraction clipped to $\min(f^*, 0.025)$.
+  * **Daily Slate Cap**: Daily cumulative paper exposure capped at $\le 0.080$. Remaining slate capacity dynamically bounds each subsequent decision on the slate. Once cumulative exposure reaches $0.080$, capacity is exhausted and additional bets receive a stake fraction of $0.0$.
+  * **Deterministic Exposure Snapshot**: Each decision record embeds an immutable `exposure_snapshot` capturing `slate_id`, `preceding_decision_ids`, `prior_cumulative_exposure`, and `post_decision_cumulative_exposure`. Replaying identical decision streams across independent environments yields bitwise identical exposure metrics.
+
+### 5.4 Governance & Non-Prospective Invariants
+* **Strict Non-Prospective Evidence**: Every Stage 4 record is tagged `test_flag = TEST_ONLY_NON_PROSPECTIVE`, `prospective_eligible = False`, `evidence_classification = "PRE_EPOCH_VALIDATION"`, and `is_paper_decision = True`.
+* **Prospective Denominator Guard**: `PROSPECTIVE_DENOMINATOR` remains strictly `0`.
+* **Pre-Epoch Activation Guard**: Any attempt to run either daemon with `capture_mode = PROSPECTIVE` while `EPOCH_1_MODEL_SHA = UNASSIGNED` raises `ProspectiveActivationBlockedError`.
+* **Paper Stakes Only**: All sizing values are paper simulations. No real money bets are placed, and zero claims of liquidity or fills are made.

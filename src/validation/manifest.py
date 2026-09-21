@@ -26,6 +26,8 @@ EXTERNAL_CONTRACT_IDENTITIES: dict[str, str] = {
     "forecast_capture_contract": "ForecastCaptureContract::v1.0",
     "market_benchmark_contract": "MarketBenchmarkContract::v1.0",
     "forecast_timing_contract": "ForecastTimingContract::v1.0",
+    "execution_quote_contract": "ExecutionQuoteContract::v1.0",
+    "paper_decision_contract": "PaperDecisionContract::v1.0",
 }
 
 HEX_40_REGEX = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -90,11 +92,51 @@ def extract_semantic_state(config: AppConfig | dict | None = None, team_mappings
 
     # Edge and Risk policy: hurdles, sizing, exposure caps
     e = cfg_dict.get("edge", {})
+    kelly_val = e.get("kelly_fraction") if e.get("kelly_fraction") is not None else e.get("kelly_multiplier")
+    if kelly_val is None and "kelly_multiplier" in cfg_dict:
+        kelly_val = cfg_dict["kelly_multiplier"]
+
+    slate_cap_val = e.get("daily_slate_cap") if e.get("daily_slate_cap") is not None else e.get("slate_cap")
+    if slate_cap_val is None and "slate_cap" in cfg_dict:
+        slate_cap_val = cfg_dict["slate_cap"]
+
     edge_semantic = {
-        "min_ev": e.get("min_ev"),
-        "kelly_fraction": e.get("kelly_fraction"),
-        "single_match_cap": e.get("single_match_cap"),
-        "daily_slate_cap": e.get("daily_slate_cap"),
+        "min_ev": e.get("min_ev") if e.get("min_ev") is not None else cfg_dict.get("min_ev"),
+        "kelly_fraction": kelly_val,
+        "single_match_cap": e.get("single_match_cap") if e.get("single_match_cap") is not None else cfg_dict.get("single_match_cap"),
+        "daily_slate_cap": slate_cap_val,
+    }
+
+    # Execution and Decision policy (Stage 4 / A09)
+    x = cfg_dict.get("execution", {})
+    exec_source = x.get("execution_price_source") or cfg_dict.get("execution_price_source") or "NAMED_OBSERVABLE_BOOKMAKER"
+    bench_role = x.get("benchmark_price_role") or cfg_dict.get("benchmark_price_role") or "REFERENCE_INFORMATION_FILTER_ONLY"
+    allow_fallback = x.get("allow_benchmark_fallback") if x.get("allow_benchmark_fallback") is not None else cfg_dict.get("allow_benchmark_fallback", False)
+
+    max_age = x.get("max_execution_quote_age_seconds")
+    if max_age is None:
+        max_age = x.get("max_execution_quote_age")
+    if max_age is None:
+        max_age = cfg_dict.get("max_execution_quote_age_seconds")
+    if max_age is None:
+        max_age = cfg_dict.get("max_execution_quote_age", 900)
+
+    lead_time = x.get("decision_lead_time_seconds") or cfg_dict.get("decision_lead_time_seconds", 3600)
+    mkt_type = x.get("market_type") or cfg_dict.get("market_type", "1X2")
+    sel = x.get("selection") or cfg_dict.get("selection", "DRAW")
+    exec_mode = x.get("execution_mode") or cfg_dict.get("execution_mode", "PAPER_AT_OBSERVED_NAMED_QUOTE")
+    mkt_filter_policy = x.get("market_relative_filter_policy") or cfg_dict.get("market_relative_filter_policy", "MODEL_DRAW_PROB_EXCEEDS_BENCHMARK_DEVIGGED")
+
+    execution_semantic = {
+        "execution_price_source": exec_source,
+        "benchmark_price_role": bench_role,
+        "allow_benchmark_fallback": allow_fallback,
+        "max_execution_quote_age_seconds": max_age,
+        "decision_lead_time_seconds": lead_time,
+        "market_type": mkt_type,
+        "selection": sel,
+        "execution_mode": exec_mode,
+        "market_relative_filter_policy": mkt_filter_policy,
     }
 
     # Leagues mapping
@@ -105,6 +147,7 @@ def extract_semantic_state(config: AppConfig | dict | None = None, team_mappings
         "model": model_semantic,
         "devig": devig_semantic,
         "edge": edge_semantic,
+        "execution": execution_semantic,
     }
 
     if team_mappings is not None:

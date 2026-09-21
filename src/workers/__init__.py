@@ -23,10 +23,20 @@ from src.workers.activation_guard import (
     ProspectiveActivationContext,
     ProspectiveActivationGuard,
 )
+from src.workers.decision_daemon import (
+    PAPER_DECISION_CONTRACT_VERSION,
+    DecisionDaemon,
+    DecisionFailureReason,
+    compute_exposure_state_identity,
+)
 
 __all__ = [
     "CaptureMode",
     "ProspectiveActivationBlockedError",
     "ProspectiveActivationContext",
     "ProspectiveActivationGuard",
+    "DecisionDaemon",
+    "DecisionFailureReason",
+    "PAPER_DECISION_CONTRACT_VERSION",
+    "compute_exposure_state_identity",
 ]

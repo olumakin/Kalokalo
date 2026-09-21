@@ -36,3 +36,14 @@ edge:
 ledger:
   path: "data/ledger.parquet"
   format: "parquet"
+
+execution:
+  execution_price_source: "NAMED_OBSERVABLE_BOOKMAKER"
+  benchmark_price_role: "REFERENCE_INFORMATION_FILTER_ONLY"
+  allow_benchmark_fallback: false
+  max_execution_quote_age_seconds: 900
+  decision_lead_time_seconds: 3600
+  market_type: "1X2"
+  selection: "DRAW"
+  execution_mode: "PAPER_AT_OBSERVED_NAMED_QUOTE"
+  market_relative_filter_policy: "MODEL_DRAW_PROB_EXCEEDS_BENCHMARK_DEVIGGED"
