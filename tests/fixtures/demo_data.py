@@ -1,10 +1,14 @@
 """
-Offline demo/synthetic data generator.
+Offline demo/synthetic data generator — test fixture only.
 
-This sandbox has no outbound access to football-data.co.uk (or any live
-odds provider), so the Streamlit UI needs a way to be fully explorable
-without a network round-trip. This module simulates a plausible match
-history and a fixture card using real canonical team codes.
+Phase 0 (revised): the app is public now, so it no longer ships a demo
+mode (a public visitor must never be able to trigger anything, and an
+admin's only data source is football-data.co.uk) — this module moved
+out of src/ingestion/ into tests/fixtures/ for exactly that reason. No
+app code imports it; it exists purely so tests (and manual local
+exploration, `python -c "from tests.fixtures.demo_data import ..."`)
+have a network-free source of plausible match history without needing
+football-data.co.uk reachable.
 
 Each team is given a fixed latent attack/defense strength; goals are
 drawn Poisson around those strengths, and 1X2 odds are derived from the
