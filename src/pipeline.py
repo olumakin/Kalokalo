@@ -25,7 +25,7 @@ from src.ingestion.normalizer import normalize_dataframe
 from src.ingestion.odds_feed import load_fixture_csv
 from src.models.dixon_coles import DixonColesModel
 from src.models.simulator import match_probabilities, top_scorelines
-from src.tracking.ledger import Ledger
+from src.tracking.supabase_ledger import get_supabase_client, prediction_row_from_pipeline, write_predictions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -65,8 +65,12 @@ def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: 
             "top_score_prob": p1,
             "alt_score": f"{h2}-{a2}",
             "alt_score_prob": p2,
+            "market_p_home": market_h,
             "market_p_draw": market_d,
+            "market_p_away": market_a,
+            "odds_home": row["odds_home"],
             "odds_draw": row["odds_draw"],
+            "odds_away": row["odds_away"],
             "ev": ev,
             "qualified": qualified,
             "kelly_raw": f_kelly,
@@ -130,23 +134,39 @@ def fit_model(
     return model
 
 
-def record_ledger(predictions: pd.DataFrame, settings: dict) -> None:
+def record_predictions_to_supabase(
+    predictions: pd.DataFrame, model: DixonColesModel, settings: dict,
+    price_source: str, run_id: str | None = None, client=None,
+) -> dict:
+    """Write every prediction row to Supabase — the only ledger (Phase 0
+    revised; the local file ledger has been retired, see
+    scripts/migrate_local_ledger_to_supabase.py for its one-time
+    migration). Shared by both entry points into this pipeline (the CLI's
+    `run()` below and app.py's admin-gated "Run pipeline" action) so
+    there's exactly one write path, not two copies that could drift.
+
+    Never raises: a Supabase outage must never block showing predictions
+    on screen or crash the CLI. Returns a status dict — {"run_id",
+    "status", "failed"} — for the caller to surface (System Health panel
+    in the UI, a log line for the CLI).
+    """
+    import uuid
+
     if predictions.empty:
-        return
-    ledger = Ledger(settings["ledger"]["path"], fmt=settings["ledger"]["format"])
-    for _, row in predictions.iterrows():
-        ledger.record_prediction(
-            match_id=row["match_id"],
-            league=row["league"],
-            home_team=row["home_team"],
-            away_team=row["away_team"],
-            model_p_draw=row["model_p_draw"],
-            market_p_draw=row["market_p_draw"],
-            odds_draw=row["odds_draw"],
-            ev=row["ev"],
-            stake_pct=row["stake_pct"],
-            timestamp=pd.Timestamp.utcnow(),
-        )
+        return {"run_id": run_id, "status": "no predictions to record", "failed": 0}
+
+    run_id = run_id or str(uuid.uuid4())
+    client = client or get_supabase_client()
+    if client is None:
+        return {"run_id": run_id, "status": "Not configured", "failed": len(predictions)}
+
+    rows = [
+        prediction_row_from_pipeline(row, run_id, model, settings, price_source)
+        for _, row in predictions.iterrows()
+    ]
+    failed = write_predictions(rows, client=client)
+    status = "OK" if failed == 0 else f"{failed} row(s) failed this run"
+    return {"run_id": run_id, "status": status, "failed": failed}
 
 
 def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path: str | None = None) -> pd.DataFrame:
@@ -166,7 +186,8 @@ def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path
         return pd.DataFrame()
 
     predictions = build_predictions(fixtures, model, settings)
-    record_ledger(predictions, settings)
+    result = record_predictions_to_supabase(predictions, model, settings, price_source="cli_fixture_csv")
+    logger.info("Supabase ledger: %s (run_id=%s, failed=%d)", result["status"], result["run_id"], result["failed"])
     return predictions
 
 
