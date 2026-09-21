@@ -38,7 +38,7 @@ def _line_in_any_range(lineno: int, ranges: list[tuple[int, int]]) -> bool:
 
 
 def _read(path: str) -> str:
-    return (REPO_ROOT / path).read_text()
+    return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
 class TestNoDemoOrUploadInLiveApp:
