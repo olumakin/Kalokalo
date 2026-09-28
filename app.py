@@ -268,6 +268,17 @@ if admin and run_clicked:
         st.error("No historical matches loaded — cannot fit the model.")
         st.stop()
 
+    missing_leagues = sorted(set(dl_leagues) - set(matches["league"].unique()))
+    if missing_leagues:
+        names = ", ".join(f"{c} ({settings['leagues'].get(c, c)})" for c in missing_leagues)
+        st.warning(
+            f"⚠️ No historical data could be fetched for: {names}. "
+            f"These leagues will be silently skipped for this run — no fixtures or "
+            f"predictions will be produced for them. This is usually a source-side "
+            f"availability issue at football-data.co.uk, not a bug here; try again "
+            f"in a bit, or check the app logs for the download error."
+        )
+
     with st.spinner("Fitting Dixon-Coles model..."):
         try:
             model = fit_model(matches, settings)
