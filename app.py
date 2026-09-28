@@ -47,10 +47,6 @@ _FEED_LABELS = {
 
 CARD_CSS = """
 <style>
-    .stApp {
-        background-color: #0b0f19;
-        color: #f1f5f9;
-    }
     div[data-testid="stVerticalBlockBorderWrapper"] {
         border-radius: 16px;
         background: linear-gradient(145deg, #111827, #1e293b);
@@ -62,6 +58,22 @@ CARD_CSS = """
     div[data-testid="stVerticalBlockBorderWrapper"]:hover {
         border-color: #38bdf8;
         transform: translateY(-3px);
+    }
+    /* The card keeps its own fixed dark background regardless of the
+       viewer's Streamlit theme (light/dark/system), so its text must
+       stay light explicitly here -- unlike the rest of the page, which
+       should follow the active theme rather than fight it. !important
+       guards against Streamlit's own theme-driven color on metric/
+       caption widgets, which otherwise wins by specificity. */
+    div[data-testid="stVerticalBlockBorderWrapper"] h1,
+    div[data-testid="stVerticalBlockBorderWrapper"] h2,
+    div[data-testid="stVerticalBlockBorderWrapper"] h3,
+    div[data-testid="stVerticalBlockBorderWrapper"] p,
+    div[data-testid="stVerticalBlockBorderWrapper"] span,
+    div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMetricLabel"],
+    div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMetricValue"],
+    div[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stCaptionContainer"] {
+        color: #f1f5f9 !important;
     }
     .league-pill {
         font-size: 0.75rem;
@@ -338,19 +350,28 @@ else:
         return league_names.get(league, {}).get(code, code)
 
     available_leagues = sorted(predictions["league"].dropna().unique().tolist())
-    selected_leagues = st.multiselect(
-        "Active Competitions", options=available_leagues, default=available_leagues,
-        format_func=lambda c: settings["leagues"].get(c, f"Unknown code: {c}"),
-        key="active_competitions_filter",
-        help="Filters the published predictions below.",
-    )
+    f_leagues, f_tie = st.columns([2, 1])
+    with f_leagues:
+        selected_leagues = st.multiselect(
+            "Active Competitions", options=available_leagues, default=available_leagues,
+            format_func=lambda c: settings["leagues"].get(c, f"Unknown code: {c}"),
+            key="active_competitions_filter",
+            help="Filters the published predictions below.",
+        )
+    with f_tie:
+        min_tie_chance = st.slider(
+            "Min. Draw Chance", min_value=0, max_value=60, value=0, step=1, format="%d%%",
+            key="tie_chance_filter",
+            help="Only show fixtures with at least this modeled P(draw).",
+        )
 
     filtered = predictions[predictions["league"].isin(selected_leagues)] if selected_leagues else predictions.iloc[0:0]
+    filtered = filtered[filtered["p_draw"] >= min_tie_chance / 100]
 
     if not selected_leagues:
         st.info("Select at least one competition above to view matches.")
     elif filtered.empty:
-        st.warning("No published fixtures for the selected competition(s).")
+        st.warning("No published fixtures match the selected competition(s) and minimum draw chance.")
     else:
         feed_label = _FEED_LABELS.get(filtered.iloc[0].get("entry_source"), "Unknown feed")
         st.markdown(
