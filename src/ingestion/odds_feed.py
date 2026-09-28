@@ -58,11 +58,14 @@ def load_fixture_csv(path: str | Path, mappings: dict | None = None) -> pd.DataF
 
 
 # The Odds API's own sport keys — not our internal league codes.
+# D1 was previously "soccer_germany_bundesliga1", which 404s: The Odds
+# API's top-flight key has no numeral (the "1"/"2" suffix distinguishes
+# soccer_germany_bundesliga2, the second division, from this one).
 ODDS_API_SPORT_KEYS = {
     "E0": "soccer_epl",
     "SP1": "soccer_spain_la_liga",
     "I1": "soccer_italy_serie_a",
-    "D1": "soccer_germany_bundesliga1",
+    "D1": "soccer_germany_bundesliga",
     "F1": "soccer_france_ligue_one",
 }
 
