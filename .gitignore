@@ -9,6 +9,7 @@ venv/
 data/historical/*.csv
 data/ledger.parquet
 data/ledger.csv
+data/cache/
 
 .DS_Store
 
