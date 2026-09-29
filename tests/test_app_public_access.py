@@ -65,6 +65,13 @@ class TestAdminOnlyPages:
         assert at.button == []
         assert at.title == []
 
+    def test_model_diagnostics_page_shows_only_restricted_for_logged_out_visitor(self):
+        at = AppTest.from_file("../pages/1_Model_Diagnostics.py", default_timeout=60)
+        at.run()
+        assert at.exception == []
+        assert [w.value for w in at.warning] == ["Restricted"]
+        assert at.title == []
+
     def test_backtest_page_never_reaches_walk_forward_run(self):
         import unittest.mock as mock
 

@@ -7,8 +7,10 @@ from src.tracking.supabase_ledger import (
     fetch_gate_status,
     fetch_latest_predictions,
     fetch_predictions,
+    fetch_settlements,
     get_supabase_client,
     is_ledger_online,
+    latest_settlement_by_fixture,
     prediction_row_from_pipeline,
     write_predictions,
     write_settlement,
@@ -195,6 +197,46 @@ class TestFetchGateStatus:
         client = MagicMock()
         client.table().select().execute.side_effect = RuntimeError("network blocked")
         assert fetch_gate_status(client=client) == {}
+
+
+class TestFetchSettlements:
+    def test_no_client_returns_empty_dataframe(self):
+        assert fetch_settlements(client=None).empty
+
+    def test_returns_all_rows_unfiltered(self):
+        client = MagicMock()
+        client.table().select().order().limit().execute.return_value = MagicMock(data=[
+            {"fixture_id": "a", "settled_at": "2026-09-20T12:00:00Z"},
+            {"fixture_id": "a", "settled_at": "2026-09-19T12:00:00Z"},
+        ])
+        result = fetch_settlements(client=client)
+        assert len(result) == 2
+
+    def test_query_failure_returns_empty_dataframe_not_raise(self):
+        client = MagicMock()
+        client.table().select().order().limit().execute.side_effect = RuntimeError("network blocked")
+        assert fetch_settlements(client=client).empty
+
+
+class TestLatestSettlementByFixture:
+    def test_no_settlements_returns_empty_dataframe(self):
+        client = MagicMock()
+        client.table().select().order().limit().execute.return_value = MagicMock(data=[])
+        assert latest_settlement_by_fixture(client=client).empty
+
+    def test_keeps_only_the_most_recent_row_per_fixture(self):
+        client = MagicMock()
+        client.table().select().order().limit().execute.return_value = MagicMock(data=[
+            {"fixture_id": "a", "settled_at": "2026-09-19T12:00:00Z", "home_goals": 0},
+            {"fixture_id": "a", "settled_at": "2026-09-20T12:00:00Z", "home_goals": 1},
+            {"fixture_id": "b", "settled_at": "2026-09-20T09:00:00Z", "home_goals": 2},
+        ])
+
+        result = latest_settlement_by_fixture(client=client)
+
+        assert len(result) == 2
+        row_a = result[result["fixture_id"] == "a"].iloc[0]
+        assert row_a["home_goals"] == 1  # the later (corrective) settlement, not the first
 
 
 class TestPredictionRowFromPipeline:

@@ -4,7 +4,11 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from src.webapp.auth import require_admin
+
 st.set_page_config(page_title="DVPE — Model Diagnostics", page_icon="📊", layout="wide")
+require_admin()
+
 st.title("Model Diagnostics")
 
 model = st.session_state.get("model")

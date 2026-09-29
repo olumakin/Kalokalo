@@ -248,6 +248,43 @@ def fetch_latest_predictions(client=None, limit: int = 500) -> pd.DataFrame:
     return df[df["run_id"] == latest_run_id].reset_index(drop=True)
 
 
+def fetch_settlements(client=None, limit: int = 500) -> pd.DataFrame:
+    """Read the `limit` most recently settled rows from `settlements`.
+    Returns an empty DataFrame (logged warning, never raises) if the
+    client is unavailable or the query fails.
+
+    A fixture can have more than one settlement row if an earlier one
+    was recorded in error — settlements is append-only, so a correction
+    is a new row, never an edit of the old one. Callers that need "is
+    this fixture settled" or "what's the current result" should use
+    latest_settlement_by_fixture() below rather than assume one row per
+    fixture_id here.
+    """
+    client = client or get_supabase_client()
+    if client is None:
+        return pd.DataFrame()
+
+    try:
+        resp = client.table("settlements").select("*").order("settled_at", desc=True).limit(limit).execute()
+        rows = resp.data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Supabase settlements read failed: %s", exc)
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
+
+
+def latest_settlement_by_fixture(client=None, limit: int = 500) -> pd.DataFrame:
+    """One row per fixture_id — the most recently settled_at row for
+    each, so a corrective re-settlement supersedes the one it corrects.
+    Empty DataFrame if there are no settlements or the read fails."""
+    df = fetch_settlements(client=client, limit=limit)
+    if df.empty:
+        return df
+    df = df.sort_values("settled_at", ascending=False)
+    return df.drop_duplicates(subset="fixture_id", keep="first").reset_index(drop=True)
+
+
 def fetch_gate_status(client=None) -> dict[str, dict[str, Any]]:
     """Read the per-league staking-eligibility gate. Returns {} (logged
     warning, never raises) if the client is unavailable or the query

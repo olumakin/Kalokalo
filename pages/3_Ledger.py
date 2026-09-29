@@ -4,7 +4,9 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from src.tracking.supabase_ledger import fetch_predictions, is_ledger_online, write_settlement
+from src.tracking.supabase_ledger import (
+    fetch_predictions, is_ledger_online, latest_settlement_by_fixture, write_settlement,
+)
 from src.webapp.auth import require_admin
 
 st.set_page_config(page_title="DVPE — Ledger", page_icon="📒", layout="wide")
@@ -25,7 +27,14 @@ if df.empty:
 
 df["created_at"] = pd.to_datetime(df["created_at"])
 df["staked"] = df["stake_shadow"].fillna(0) > 0
-df["settled"] = df["actual_home_goals"].notna()
+
+# predictions.actual_home_goals is never populated by this app (settling a
+# fixture only ever inserts into `settlements`, never touches `predictions`
+# — see write_settlement's docstring) — "settled" has to come from whether
+# a settlements row actually exists for this fixture, not from that column.
+settlements = latest_settlement_by_fixture()
+settled_fixture_ids = set(settlements["fixture_id"]) if not settlements.empty else set()
+df["settled"] = df["fixture_id"].isin(settled_fixture_ids)
 
 # --------------------------------------------------------------------------
 # Filters
