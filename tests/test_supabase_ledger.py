@@ -34,24 +34,53 @@ class TestGetSupabaseClient:
     def test_explicit_credentials_used_over_env(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
+        monkeypatch.delenv("SUPABASE_APP_SECRET", raising=False)
         with patch("supabase.create_client") as mock_create:
             mock_create.return_value = MagicMock()
             get_supabase_client(url="https://explicit.example.supabase.co", key="explicit-key")
-            mock_create.assert_called_once_with("https://explicit.example.supabase.co", "explicit-key")
+            args, kwargs = mock_create.call_args
+            assert args == ("https://explicit.example.supabase.co", "explicit-key")
+            assert "options" in kwargs
 
     def test_falls_back_to_env_vars(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
+        monkeypatch.delenv("SUPABASE_APP_SECRET", raising=False)
         with patch("supabase.create_client") as mock_create:
             mock_create.return_value = MagicMock()
             get_supabase_client()
-            mock_create.assert_called_once_with("https://env.example.supabase.co", "env-key")
+            args, kwargs = mock_create.call_args
+            assert args == ("https://env.example.supabase.co", "env-key")
+            assert "options" in kwargs
 
     def test_client_construction_failure_returns_none_not_raise(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
         with patch("supabase.create_client", side_effect=RuntimeError("boom")):
             assert get_supabase_client() is None
+
+    def test_app_secret_attached_as_header_when_configured(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
+        monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
+        monkeypatch.setenv("SUPABASE_APP_SECRET", "top-secret")
+        with patch("supabase.create_client") as mock_create:
+            mock_create.return_value = MagicMock()
+            get_supabase_client()
+            _, kwargs = mock_create.call_args
+            assert kwargs["options"].headers.get("x-app-secret") == "top-secret"
+
+    def test_missing_app_secret_degrades_gracefully_no_header(self, monkeypatch):
+        import streamlit as st
+
+        monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
+        monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
+        monkeypatch.delenv("SUPABASE_APP_SECRET", raising=False)
+        monkeypatch.setattr(st, "secrets", MagicMock(get=MagicMock(return_value=None)))
+        with patch("supabase.create_client") as mock_create:
+            mock_create.return_value = MagicMock()
+            get_supabase_client()
+            _, kwargs = mock_create.call_args
+            assert "x-app-secret" not in kwargs["options"].headers
 
 
 class TestWritePredictions:
@@ -149,31 +178,70 @@ class TestFetchPredictions:
 
 
 class TestFetchLatestPredictions:
+    """fetch_latest_predictions is two queries now: a 1-row lookup of
+    the most recent run_id, then a narrow-column fetch of just that
+    run's rows -- select() is called with different arguments for each
+    (a single "run_id" string vs. the full comma-joined column list),
+    so tests key the mocked response off which columns were asked for
+    rather than assuming one flat call chain."""
+
+    @staticmethod
+    def _client(latest_run_rows, run_rows):
+        client = MagicMock()
+
+        def select_side_effect(columns):
+            m = MagicMock()
+            if columns == "run_id":
+                m.order.return_value.limit.return_value.execute.return_value = MagicMock(data=latest_run_rows)
+            else:
+                m.eq.return_value.limit.return_value.execute.return_value = MagicMock(data=run_rows)
+            return m
+
+        client.table.return_value.select.side_effect = select_side_effect
+        return client
+
     def test_no_client_returns_empty_dataframe(self):
         result = fetch_latest_predictions(client=None)
         assert result.empty
 
     def test_filters_to_the_most_recent_run_id(self):
-        client = MagicMock()
-        client.table().select().order().limit().execute.return_value = MagicMock(data=[
-            {"fixture_id": "a", "run_id": "run-2", "created_at": "2026-09-20T12:00:00Z"},
-            {"fixture_id": "b", "run_id": "run-2", "created_at": "2026-09-20T12:00:00Z"},
-            {"fixture_id": "c", "run_id": "run-1", "created_at": "2026-09-19T12:00:00Z"},
-        ])
+        client = self._client(
+            latest_run_rows=[{"run_id": "run-2"}],
+            run_rows=[
+                {"fixture_id": "a", "run_id": "run-2"},
+                {"fixture_id": "b", "run_id": "run-2"},
+            ],
+        )
 
         result = fetch_latest_predictions(client=client)
 
         assert len(result) == 2
         assert set(result["fixture_id"]) == {"a", "b"}
 
-    def test_empty_response_returns_empty_dataframe(self):
-        client = MagicMock()
-        client.table().select().order().limit().execute.return_value = MagicMock(data=[])
+    def test_no_predictions_at_all_returns_empty_dataframe(self):
+        client = self._client(latest_run_rows=[], run_rows=[])
         assert fetch_latest_predictions(client=client).empty
 
-    def test_query_failure_returns_empty_dataframe_not_raise(self):
+    def test_latest_run_lookup_failure_returns_empty_dataframe_not_raise(self):
         client = MagicMock()
-        client.table().select().order().limit().execute.side_effect = RuntimeError("network blocked")
+        client.table.return_value.select.return_value.order.return_value.limit.return_value.execute.side_effect = (
+            RuntimeError("network blocked")
+        )
+        assert fetch_latest_predictions(client=client).empty
+
+    def test_row_fetch_failure_returns_empty_dataframe_not_raise(self):
+        client = self._client(latest_run_rows=[{"run_id": "run-2"}], run_rows=[])
+        client.table.return_value.select.side_effect = None
+
+        def select_side_effect(columns):
+            m = MagicMock()
+            if columns == "run_id":
+                m.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[{"run_id": "run-2"}])
+            else:
+                m.eq.return_value.limit.return_value.execute.side_effect = RuntimeError("network blocked")
+            return m
+
+        client.table.return_value.select.side_effect = select_side_effect
         assert fetch_latest_predictions(client=client).empty
 
 

@@ -57,6 +57,26 @@ def _resolve_credentials(url: str | None, key: str | None) -> tuple[str | None, 
     return url, key
 
 
+def _resolve_app_secret() -> str | None:
+    """SUPABASE_APP_SECRET, sent as the x-app-secret request header on
+    every call this client makes. The predictions/settlements INSERT
+    RLS policies (supabase/migrations/0003_indexes_and_header_secret.sql)
+    require this header to match — the anon/publishable key alone is no
+    longer sufficient to write a row, without ever using the
+    service-role key. Returns None (not an error) if unconfigured; a
+    client built without it can still read everything and write
+    against the pre-migration policy, so this degrades gracefully
+    during the rollout window rather than blocking client construction."""
+    secret = os.environ.get("SUPABASE_APP_SECRET")
+    if secret:
+        return secret
+    try:
+        import streamlit as st
+        return st.secrets.get("SUPABASE_APP_SECRET")
+    except Exception:
+        return None
+
+
 def get_supabase_client(url: str | None = None, key: str | None = None):
     """Build a Supabase client from explicit args, then env vars, then
     Streamlit secrets. Returns None (logged warning) rather than raising
@@ -69,8 +89,10 @@ def get_supabase_client(url: str | None = None, key: str | None = None):
         return None
 
     try:
-        from supabase import create_client
-        return create_client(url, key)
+        from supabase import ClientOptions, create_client
+        app_secret = _resolve_app_secret()
+        options = ClientOptions(headers={"x-app-secret": app_secret}) if app_secret else ClientOptions()
+        return create_client(url, key, options=options)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not construct Supabase client: %s", exc)
         return None
@@ -230,22 +252,58 @@ def fetch_predictions(client=None, limit: int = 500) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def fetch_latest_predictions(client=None, limit: int = 500) -> pd.DataFrame:
+# Columns app.py's Matchday page actually reads (public cards plus the
+# admin-only shadow-stake expander, which reads from this same frame —
+# stake_shadow/ev_entry are gated by is_admin() in the UI, not excluded
+# here). Narrower than "*", which pulled all ~40 columns including
+# several (git_commit, converged, xi_val, close_*, ...) this page never
+# touches.
+_LATEST_PREDICTIONS_COLUMNS = (
+    "fixture_id,run_id,match_date,league,home_id,away_id,"
+    "p_home,p_draw,p_away,lambda_val,mu_val,rho_val,"
+    "entry_source,stake_shadow,ev_entry,created_at"
+)
+
+
+def fetch_latest_predictions(client=None, limit: int = 1000) -> pd.DataFrame:
     """Read only the most recent pipeline run's predictions — the
     public Matchday page's sole data source; it never fits a model or
     calls a data feed itself.
 
-    Fetches the `limit` most recently created rows via fetch_predictions,
-    then filters to just the single most recent run_id among them — the
-    whole slate from one admin run shares a run_id and a near-identical
-    created_at, so this is exact as long as one run's fixture count
-    stays under `limit` (comfortably true for a 5-league Big 5 slate).
+    Two queries instead of fetch_predictions' fetch-500-then-filter:
+    first the single most recent run_id (a 1-row, 1-column lookup),
+    then only that run's rows, selecting only the columns app.py
+    actually uses rather than every column in the table.
     """
-    df = fetch_predictions(client=client, limit=limit)
-    if df.empty:
-        return df
-    latest_run_id = df.iloc[0]["run_id"]
-    return df[df["run_id"] == latest_run_id].reset_index(drop=True)
+    client = client or get_supabase_client()
+    if client is None:
+        return pd.DataFrame()
+
+    try:
+        latest = client.table("predictions").select("run_id").order("created_at", desc=True).limit(1).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Supabase latest-run lookup failed: %s", exc)
+        return pd.DataFrame()
+
+    latest_rows = latest.data or []
+    if not latest_rows:
+        return pd.DataFrame()
+    latest_run_id = latest_rows[0]["run_id"]
+
+    try:
+        resp = (
+            client.table("predictions")
+            .select(_LATEST_PREDICTIONS_COLUMNS)
+            .eq("run_id", latest_run_id)
+            .limit(limit)
+            .execute()
+        )
+        rows = resp.data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Supabase latest predictions read failed: %s", exc)
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
 
 
 def fetch_settlements(client=None, limit: int = 500) -> pd.DataFrame:
