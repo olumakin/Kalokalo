@@ -26,12 +26,14 @@ CREATE INDEX IF NOT EXISTS idx_settlements_fixture_id ON settlements (fixture_id
 -- from SUPABASE_APP_SECRET in your Streamlit secrets before running.
 
 DROP POLICY IF EXISTS "Allow anon insert" ON predictions;
+DROP POLICY IF EXISTS "Allow anon insert with secret" ON predictions;
 CREATE POLICY "Allow anon insert with secret" ON predictions FOR INSERT TO anon
 WITH CHECK (
     current_setting('request.headers', true)::json ->> 'x-app-secret' = 'REPLACE_WITH_YOUR_APP_SECRET'
 );
 
 DROP POLICY IF EXISTS "Allow anon insert" ON settlements;
+DROP POLICY IF EXISTS "Allow anon insert with secret" ON settlements;
 CREATE POLICY "Allow anon insert with secret" ON settlements FOR INSERT TO anon
 WITH CHECK (
     current_setting('request.headers', true)::json ->> 'x-app-secret' = 'REPLACE_WITH_YOUR_APP_SECRET'
