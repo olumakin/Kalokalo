@@ -312,17 +312,25 @@ if admin and run_clicked:
 
     predictions_out = build_predictions(fixtures, model, settings)
     result = record_predictions_to_supabase(predictions_out, model, settings, price_source=fixture_source_used)
-    if result["failed"] > 0:
-        st.error(f"Supabase write: {result['status']}")
-    else:
-        st.success(f"Recorded {len(predictions_out)} predictions to Supabase (run {result['run_id'][:8]}...).")
 
     # Session-only handoff to the admin-only Model Diagnostics / Backtest
-    # pages — never used by the public read path below.
+    # pages — never used by the public read path below. Stashed before the
+    # failure check so a failed write doesn't also lose this.
     st.session_state["model"] = model
     st.session_state["matches"] = matches
     st.session_state["settings"] = settings
 
+    if result["failed"] > 0:
+        # Previously followed by an immediate st.rerun(), which wiped this
+        # message before anyone could read it -- a write failure looked
+        # identical to success, just with stale data left on screen. Stop
+        # here instead so the error stays visible; the admin re-runs the
+        # pipeline manually once it's addressed, rather than this retrying
+        # on its own.
+        st.error(f"Supabase write failed: {result['status']}. Predictions were NOT updated — retry once resolved.")
+        st.stop()
+
+    st.success(f"Recorded {len(predictions_out)} predictions to Supabase (run {result['run_id'][:8]}...).")
     _cached_latest_predictions.clear()
     st.rerun()
 

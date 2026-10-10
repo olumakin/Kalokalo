@@ -57,42 +57,33 @@ def _resolve_credentials(url: str | None, key: str | None) -> tuple[str | None, 
     return url, key
 
 
-def _resolve_app_secret() -> str | None:
-    """SUPABASE_APP_SECRET, sent as the x-app-secret request header on
-    every call this client makes. The predictions/settlements INSERT
-    RLS policies (supabase/migrations/0003_indexes_and_header_secret.sql)
-    require this header to match — the anon/publishable key alone is no
-    longer sufficient to write a row, without ever using the
-    service-role key. Returns None (not an error) if unconfigured; a
-    client built without it can still read everything and write
-    against the pre-migration policy, so this degrades gracefully
-    during the rollout window rather than blocking client construction."""
-    secret = os.environ.get("SUPABASE_APP_SECRET")
-    if secret:
-        return secret
-    try:
-        import streamlit as st
-        return st.secrets.get("SUPABASE_APP_SECRET")
-    except Exception:
-        return None
-
-
 def get_supabase_client(url: str | None = None, key: str | None = None):
     """Build a Supabase client from explicit args, then env vars, then
     Streamlit secrets. Returns None (logged warning) rather than raising
     if credentials are missing or the client can't be constructed —
     every write function below treats None as "ledger unavailable" and
-    reports it back to the caller instead of crashing the pipeline."""
+    reports it back to the caller instead of crashing the pipeline.
+
+    predictions/settlements INSERT is anon + RLS WITH CHECK (true) --
+    a shared-secret request-header policy was tried (see
+    supabase/migrations/0003/0004) and reverted in 0005: it rejected
+    every write with a generic 42501 in production, and after multiple
+    rounds of remote diagnosis (verified the client sends the header
+    correctly, verified PostgREST receives it correctly) the exact
+    mismatch inside Streamlit Cloud's runtime couldn't be pinned down
+    without a debug deploy cycle this couldn't be reliably exercised
+    from this sandbox. Reverted to the previously-working policy rather
+    than leave writes broken while chasing it further; worth revisiting
+    with a visible (not silently-swallowed) failure path instead of
+    guessing blind."""
     url, key = _resolve_credentials(url, key)
     if not url or not key:
         logger.warning("Supabase credentials not configured; remote ledger writes will be skipped")
         return None
 
     try:
-        from supabase import ClientOptions, create_client
-        app_secret = _resolve_app_secret()
-        options = ClientOptions(headers={"x-app-secret": app_secret}) if app_secret else ClientOptions()
-        return create_client(url, key, options=options)
+        from supabase import create_client
+        return create_client(url, key)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not construct Supabase client: %s", exc)
         return None

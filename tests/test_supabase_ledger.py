@@ -34,53 +34,24 @@ class TestGetSupabaseClient:
     def test_explicit_credentials_used_over_env(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
-        monkeypatch.delenv("SUPABASE_APP_SECRET", raising=False)
         with patch("supabase.create_client") as mock_create:
             mock_create.return_value = MagicMock()
             get_supabase_client(url="https://explicit.example.supabase.co", key="explicit-key")
-            args, kwargs = mock_create.call_args
-            assert args == ("https://explicit.example.supabase.co", "explicit-key")
-            assert "options" in kwargs
+            mock_create.assert_called_once_with("https://explicit.example.supabase.co", "explicit-key")
 
     def test_falls_back_to_env_vars(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
-        monkeypatch.delenv("SUPABASE_APP_SECRET", raising=False)
         with patch("supabase.create_client") as mock_create:
             mock_create.return_value = MagicMock()
             get_supabase_client()
-            args, kwargs = mock_create.call_args
-            assert args == ("https://env.example.supabase.co", "env-key")
-            assert "options" in kwargs
+            mock_create.assert_called_once_with("https://env.example.supabase.co", "env-key")
 
     def test_client_construction_failure_returns_none_not_raise(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
         monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
         with patch("supabase.create_client", side_effect=RuntimeError("boom")):
             assert get_supabase_client() is None
-
-    def test_app_secret_attached_as_header_when_configured(self, monkeypatch):
-        monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
-        monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
-        monkeypatch.setenv("SUPABASE_APP_SECRET", "top-secret")
-        with patch("supabase.create_client") as mock_create:
-            mock_create.return_value = MagicMock()
-            get_supabase_client()
-            _, kwargs = mock_create.call_args
-            assert kwargs["options"].headers.get("x-app-secret") == "top-secret"
-
-    def test_missing_app_secret_degrades_gracefully_no_header(self, monkeypatch):
-        import streamlit as st
-
-        monkeypatch.setenv("SUPABASE_URL", "https://env.example.supabase.co")
-        monkeypatch.setenv("SUPABASE_ANON_KEY", "env-key")
-        monkeypatch.delenv("SUPABASE_APP_SECRET", raising=False)
-        monkeypatch.setattr(st, "secrets", MagicMock(get=MagicMock(return_value=None)))
-        with patch("supabase.create_client") as mock_create:
-            mock_create.return_value = MagicMock()
-            get_supabase_client()
-            _, kwargs = mock_create.call_args
-            assert "x-app-secret" not in kwargs["options"].headers
 
 
 class TestWritePredictions:
