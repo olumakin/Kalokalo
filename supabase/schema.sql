@@ -114,19 +114,35 @@ CREATE INDEX idx_settlements_fixture_id ON settlements (fixture_id);
 -- request) -- the publishable key alone is not enough to write a row.
 -- Still no service-role key anywhere; RLS is still insert+select only,
 -- no UPDATE/DELETE policy exists on either table.
+--
+-- The header is matched by a case-insensitive key lookup (jsonb_each_text
+-- + lower(key) = ...), not a direct ->> 'x-app-secret' lookup -- HTTP
+-- header names are case-insensitive by spec and commonly get normalized
+-- to title-case (e.g. "X-App-Secret") somewhere in the request path, so
+-- an exact-case lookup silently never matches and every insert gets
+-- rejected with 42501, no more detail than that.
+--
 -- Replace 'REPLACE_WITH_YOUR_APP_SECRET' with the exact value from
 -- SUPABASE_APP_SECRET in your Streamlit secrets before running.
 ALTER TABLE predictions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow anon insert with secret" ON predictions FOR INSERT TO anon
 WITH CHECK (
-    current_setting('request.headers', true)::json ->> 'x-app-secret' = 'REPLACE_WITH_YOUR_APP_SECRET'
+    EXISTS (
+        SELECT 1
+        FROM jsonb_each_text(current_setting('request.headers', true)::jsonb) AS h(key, value)
+        WHERE lower(h.key) = 'x-app-secret' AND h.value = 'REPLACE_WITH_YOUR_APP_SECRET'
+    )
 );
 CREATE POLICY "Allow anon select" ON predictions FOR SELECT TO anon USING (true);
 
 ALTER TABLE settlements ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow anon insert with secret" ON settlements FOR INSERT TO anon
 WITH CHECK (
-    current_setting('request.headers', true)::json ->> 'x-app-secret' = 'REPLACE_WITH_YOUR_APP_SECRET'
+    EXISTS (
+        SELECT 1
+        FROM jsonb_each_text(current_setting('request.headers', true)::jsonb) AS h(key, value)
+        WHERE lower(h.key) = 'x-app-secret' AND h.value = 'REPLACE_WITH_YOUR_APP_SECRET'
+    )
 );
 CREATE POLICY "Allow anon select" ON settlements FOR SELECT TO anon USING (true);
 
