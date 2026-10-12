@@ -56,3 +56,53 @@ class TestBuildPredictionsScorelines:
         predictions = build_predictions(fixtures, fitted_model, SETTINGS)
         assert (predictions["top_score_prob"] > 0).all()
         assert (predictions["top_score_prob"] <= 1).all()
+
+
+class TestCalibrationStakeMultiplier:
+    def test_discounts_only_the_configured_league(self, fitted_model):
+        # Caps disabled (set far above anything a single bet could reach)
+        # so the 2x relationship between leagues isn't masked by
+        # apply_risk_caps clipping one side and not the other.
+        settings = {
+            "devig": {"method": "multiplicative"},
+            "edge": {
+                "min_ev": 0.03, "kelly_fraction": 0.15,
+                "single_match_cap": 1.0, "daily_slate_cap": 1.0,
+                "calibration_stake_multiplier": {"D1": 0.5},
+            },
+        }
+        # This fitted_model gives T00-vs-T01 a model draw probability of
+        # ~0.225 (fair odds ~4.44) -- odds_draw=5.5 with a market that
+        # devigs to a draw probability well below that is a comfortable,
+        # unambiguous qualifying bet (EV ~+24%), not a boundary case that
+        # might tip either side of qualifies()'s >= 0.03 threshold.
+        same_match = {
+            "home_team": "T00", "away_team": "T01",
+            "odds_home": 1.80, "odds_draw": 5.50, "odds_away": 4.50,
+        }
+        fixtures = pd.DataFrame([
+            {"date": pd.Timestamp("2026-09-20"), "league": "E0", **same_match},
+            {"date": pd.Timestamp("2026-09-21"), "league": "D1", **same_match},
+        ])
+
+        predictions = build_predictions(fixtures, fitted_model, settings)
+        e0 = predictions[predictions["league"] == "E0"].iloc[0]
+        d1 = predictions[predictions["league"] == "D1"].iloc[0]
+
+        assert e0["qualified"]  # the discount comparison is meaningless on a non-qualifying bet
+        assert d1["qualified"]
+        assert d1["kelly_raw"] == pytest.approx(e0["kelly_raw"] * 0.5, rel=1e-6)
+        assert d1["stake_pct"] == pytest.approx(e0["stake_pct"] * 0.5, rel=1e-6)
+
+    def test_unlisted_leagues_are_unaffected(self, fitted_model, fixtures):
+        settings = {**SETTINGS, "edge": {**SETTINGS["edge"], "calibration_stake_multiplier": {"D1": 0.5}}}
+        discounted = build_predictions(fixtures, fitted_model, settings)
+        baseline = build_predictions(fixtures, fitted_model, SETTINGS)
+        # `fixtures` is all-E0 -- absent from the D1-only multiplier map.
+        pd.testing.assert_series_equal(discounted["stake_pct"], baseline["stake_pct"])
+
+    def test_missing_multiplier_config_is_backward_compatible(self, fitted_model, fixtures):
+        # Module-level SETTINGS has no calibration_stake_multiplier key at
+        # all -- must not raise (older configs, or settings.yaml edited
+        # to remove it, shouldn't crash the pipeline).
+        build_predictions(fixtures, fitted_model, SETTINGS)

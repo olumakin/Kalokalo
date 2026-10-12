@@ -37,3 +37,16 @@ edge:
   # system yet, so stakes stay expressed as a fraction of this single
   # placeholder unit, same as stake_pct always has been.
   shadow_bankroll_units: 1.0
+  # Per-league multiplier applied to the raw Kelly stake before the
+  # exposure caps (src.analytics.edge.apply_risk_caps), separate from
+  # kelly_fraction's own fixed fractional-Kelly knob above. The WP3
+  # gate-evaluation harness (src/validation/gate_harness.py) found
+  # D1's draw-probability calibration slope stuck at ~0.4-0.45 even
+  # after a walk-forward recalibration fix and an alternate rolling-
+  # calibration-window fit -- CLV clears (the picks are real), but
+  # the model is still overconfident about by how much, and Kelly
+  # sizing takes that confidence at face value. Halving D1's stake is
+  # a stopgap against that specific, measured weakness, not a general
+  # risk dial -- a league absent from this map gets 1.0 (no discount).
+  calibration_stake_multiplier:
+    D1: 0.5

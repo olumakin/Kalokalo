@@ -48,6 +48,11 @@ def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: 
         ev = calculate_ev(model_p_draw, row["odds_draw"])
         qualified = qualifies(model_p_draw, market_d, ev, min_ev=edge_cfg["min_ev"])
         f_kelly = kelly_fraction(model_p_draw, row["odds_draw"], c=edge_cfg["kelly_fraction"]) if qualified else 0.0
+        # Per-league calibration-confidence discount (see settings.yaml
+        # edge.calibration_stake_multiplier) -- applied before the
+        # exposure caps below, since it's a correction to this specific
+        # stake's own size, not a portfolio-level constraint.
+        f_kelly *= edge_cfg.get("calibration_stake_multiplier", {}).get(row["league"], 1.0)
 
         match_id = f"{row['date'].date()}_{row['league']}_{row['home_team']}_{row['away_team']}"
         rows.append({
