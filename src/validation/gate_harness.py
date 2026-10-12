@@ -34,6 +34,7 @@ from src.analytics.devig import devig
 from src.analytics.edge import calculate_ev, qualifies
 from src.models.dixon_coles import DixonColesModel
 from src.models.simulator import match_probabilities
+from src.validation.calibration import apply_draw_calibration, calibration_slope_intercept
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ RESULTS_COLUMNS = [
     "home_team", "away_team", "xi_used",
     "lambda", "mu", "rho",
     "p_home", "p_draw", "p_away",
+    "p_draw_raw", "calibration_applied", "calibration_intercept", "calibration_slope",
     "entry_home", "entry_draw", "entry_away", "entry_source",
     "close_home", "close_draw", "close_away", "close_source",
     "retail_draw",
@@ -58,6 +60,14 @@ RESULTS_COLUMNS = [
     "actual_home_goals", "actual_away_goals", "actual_outcome_idx",
     "converged", "fallback_used",
 ]
+
+# Below this many strictly-prior resolved outcomes, a calibration refit
+# is too noisy to trust (calibration_slope_intercept itself only
+# refuses below 2 observations or zero outcome variance -- this is a
+# much higher bar chosen for the fit to be *useful*, not merely
+# computable) -- predictions fall back to the identity transform
+# (intercept=0, slope=1) until enough history accumulates.
+DEFAULT_CALIBRATION_MIN_RESOLVED = 100
 
 
 def get_code_version() -> str:
@@ -148,8 +158,24 @@ def run_league_evaluation(
     code_version: str | None = None,
     run_id: str | None = None,
     on_retrain: Callable[[pd.Timestamp, pd.DataFrame], None] | None = None,
+    calibrate: bool = False,
+    calibration_min_resolved: int = DEFAULT_CALIBRATION_MIN_RESOLVED,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Strict chronological walk-forward evaluation for one league.
+
+    `calibrate`, if True, applies a walk-forward draw-probability
+    recalibration (src.validation.calibration.calibration_slope_intercept
+    / apply_draw_calibration) on top of the raw Dixon-Coles output,
+    refit at the same cadence as the model itself using only resolved
+    outcomes strictly before the current retrain point (same no-leakage
+    discipline as model training -- see the leakage tests in
+    tests/test_gate_harness.py). Below `calibration_min_resolved`
+    accumulated outcomes, predictions pass through uncalibrated
+    (intercept=0, slope=1) rather than fit a curve too noisy to trust.
+    `p_draw`/`p_home`/`p_away` (and the EV/qualified decision derived
+    from them) reflect the calibrated probabilities when this is on;
+    the pre-calibration draw probability is kept in `p_draw_raw` for
+    before/after comparison.
 
     `on_retrain`, if given, is called as `on_retrain(current_date,
     train_df)` at every retrain *attempt* (whether or not it succeeds),
@@ -198,6 +224,16 @@ def run_league_evaluation(
     results: list[dict] = []
     exclusions: list[dict] = []
 
+    # Walk-forward calibration state: (intercept, slope), None until
+    # calibration_min_resolved resolved outcomes have accumulated.
+    # resolved_p_draw/resolved_is_draw only ever receive rows from a
+    # *previous* current_date iteration (appended at the end of the
+    # loop body below), so refitting here, before this iteration's own
+    # day_matches are scored, cannot see today's or any future outcome.
+    current_calibration: tuple[float, float] | None = None
+    resolved_p_draw: list[float] = []
+    resolved_is_draw: list[int] = []
+
     for current_date in unique_dates:
         needs_retrain = (
             model is None or last_train_date is None
@@ -231,6 +267,11 @@ def run_league_evaluation(
                     prev_team_params = {t: (model.alpha_[t], model.beta_[t]) for t in model.teams_}
             last_train_date = current_date
 
+            if calibrate and len(resolved_p_draw) >= calibration_min_resolved:
+                a, b = calibration_slope_intercept(np.array(resolved_is_draw), np.array(resolved_p_draw))
+                if not (np.isnan(a) or np.isnan(b)):
+                    current_calibration = (a, b)
+
         day_matches = df[df["date"] == current_date]
         for _, row in day_matches.iterrows():
             fixture_id = f"{row['date'].date()}_{league}_{row['home_team']}_{row['away_team']}"
@@ -261,6 +302,14 @@ def run_league_evaluation(
             if not np.isclose(total, 1.0, atol=1e-6):
                 p_home, p_draw, p_away = p_home / total, p_draw / total, p_away / total
 
+            p_draw_raw = p_draw
+            calibration_applied = calibrate and current_calibration is not None
+            calib_intercept, calib_slope = current_calibration if current_calibration is not None else (0.0, 1.0)
+            if calibration_applied:
+                p_home, p_draw, p_away = apply_draw_calibration(
+                    p_home, p_draw, p_away, calib_intercept, calib_slope,
+                )
+
             entry_h, entry_d, entry_a = row.get("entry_home"), row.get("entry_draw"), row.get("entry_away")
             if pd.notna(entry_h) and pd.notna(entry_d) and pd.notna(entry_a):
                 market_h, market_d, market_a = devig(entry_h, entry_d, entry_a, method=devig_method)
@@ -282,6 +331,8 @@ def run_league_evaluation(
                 "home_team": row["home_team"], "away_team": row["away_team"], "xi_used": xi,
                 "lambda": lam, "mu": mu, "rho": rho,
                 "p_home": p_home, "p_draw": p_draw, "p_away": p_away,
+                "p_draw_raw": p_draw_raw, "calibration_applied": calibration_applied,
+                "calibration_intercept": calib_intercept, "calibration_slope": calib_slope,
                 "entry_home": entry_h, "entry_draw": entry_d, "entry_away": entry_a,
                 "entry_source": row.get("entry_source"),
                 "close_home": row.get("close_home"), "close_draw": row.get("close_draw"),
@@ -293,6 +344,10 @@ def run_league_evaluation(
                 "actual_outcome_idx": actual_idx,
                 "converged": model.converged_, "fallback_used": model.fallback_used_,
             })
+
+            if calibrate:
+                resolved_p_draw.append(p_draw_raw)
+                resolved_is_draw.append(1 if actual_idx == 1 else 0)
 
     results_df = pd.DataFrame(results, columns=RESULTS_COLUMNS) if results else pd.DataFrame(columns=RESULTS_COLUMNS)
     exclusions_df = (

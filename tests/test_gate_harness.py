@@ -179,6 +179,111 @@ class TestRunLeagueEvaluation:
         assert calls["n"] == first_calls
 
 
+def _skewed_matches(n_teams=6, rounds=5, seed=7, league="E0", season="2324", start="2020-08-01"):
+    # Heavier draw rate than the model's own Poisson implies (close
+    # scorelines engineered via tightly-matched low-scoring goals) so
+    # the model's raw p_draw is overconfident in one direction, the
+    # same failure mode the real WP3 report showed -- gives the
+    # calibration fit something real to correct.
+    rng = np.random.default_rng(seed)
+    teams = [f"T{i:02d}" for i in range(n_teams)]
+    rows = []
+    start_ts = pd.Timestamp(start, tz="UTC")
+    day = 0
+    for _ in range(rounds):
+        for home in teams:
+            for away in teams:
+                if home == away:
+                    continue
+                if rng.random() < 0.55:
+                    hg = ag = int(rng.poisson(1.1))
+                else:
+                    hg, ag = int(rng.poisson(1.4)), int(rng.poisson(1.1))
+                close_d = float(rng.uniform(3.0, 3.6))
+                rows.append({
+                    "date": start_ts + pd.Timedelta(days=day), "league": league, "season": season,
+                    "home_team": home, "away_team": away, "home_goals": hg, "away_goals": ag,
+                    "result": "H" if hg > ag else ("A" if hg < ag else "D"),
+                    "entry_home": 2.0, "entry_draw": close_d, "entry_away": 3.8,
+                    "entry_source": "Pinnacle (opening)",
+                    "close_home": 2.0, "close_draw": close_d, "close_away": 3.8,
+                    "close_source": "Pinnacle closing", "retail_draw": close_d,
+                })
+                day += 1
+    return pd.DataFrame(rows)
+
+
+class TestWalkForwardCalibration:
+    # Walk-forward evaluation is expensive (a Dixon-Coles fit per
+    # retrain point); these fixtures are shared class-wide via
+    # pytest's fixture caching so the full evaluation only runs once
+    # per calibrate mode, not once per assertion.
+
+    @pytest.fixture(scope="class")
+    def matches(self):
+        return _skewed_matches()
+
+    @pytest.fixture(scope="class")
+    def uncalibrated(self, matches):
+        return run_league_evaluation(matches, "E0", xi=0.0065, min_train_matches=30, calibrate=False)[0]
+
+    @pytest.fixture(scope="class")
+    def calibrated(self, matches):
+        return run_league_evaluation(
+            matches, "E0", xi=0.0065, min_train_matches=30, calibrate=True, calibration_min_resolved=40,
+        )[0]
+
+    def test_calibrate_false_is_a_no_op_matching_prior_behavior(self, uncalibrated):
+        assert not uncalibrated.empty
+        assert (~uncalibrated["calibration_applied"]).all()
+        assert (uncalibrated["p_draw_raw"] == uncalibrated["p_draw"]).all()
+        assert (uncalibrated["calibration_intercept"] == 0.0).all()
+        assert (uncalibrated["calibration_slope"] == 1.0).all()
+
+    def test_calibrate_true_eventually_applies_a_nontrivial_correction(self, calibrated):
+        assert not calibrated.empty
+        # Early rows (before calibration_min_resolved resolved outcomes
+        # accumulate) must still be uncalibrated -- no retroactive fix.
+        assert (~calibrated.iloc[:30]["calibration_applied"]).any()
+        # Later rows, once enough history exists, should show it applied
+        # with a real (non-identity) slope/intercept.
+        later = calibrated.iloc[-50:]
+        assert later["calibration_applied"].any()
+        applied = later[later["calibration_applied"]]
+        assert not (applied["calibration_slope"] == 1.0).all()
+        # p_draw still diverges from the raw model output wherever
+        # calibration was actually applied.
+        assert (applied["p_draw"] != applied["p_draw_raw"]).any()
+
+    def test_calibrated_probabilities_still_sum_to_one(self, calibrated):
+        assert (calibrated[["p_home", "p_draw", "p_away"]].sum(axis=1).round(6) == 1.0).all()
+
+    def test_calibration_uses_only_strictly_prior_resolved_outcomes(self, calibrated):
+        # Leakage guard. Calibration is refit only at retrain
+        # checkpoints (same cadence as the model), not every row, so
+        # the window of rows sharing one (intercept, slope) pair marks
+        # one such checkpoint -- the fit used to produce that pair can
+        # only have seen rows strictly before the *first* row of that
+        # block (that block's own day's matches are appended to the
+        # resolved history only after being scored). Comparing against
+        # everything before some row in the *middle* of the block
+        # would overcount data that accumulated after the checkpoint
+        # but wasn't used yet.
+        from src.validation.calibration import calibration_slope_intercept
+
+        applied = calibrated[calibrated["calibration_applied"]].sort_values("date")
+        assert not applied.empty
+        block_start_idx = applied["calibration_slope"].ne(applied["calibration_slope"].shift()).to_numpy()
+        first_in_block = applied[block_start_idx].iloc[0]
+
+        prior = calibrated[calibrated["date"] < first_in_block["date"]]
+        expected_a, expected_b = calibration_slope_intercept(
+            (prior["actual_outcome_idx"] == 1).to_numpy().astype(float), prior["p_draw_raw"].to_numpy(),
+        )
+        assert first_in_block["calibration_intercept"] == pytest.approx(expected_a, abs=1e-9)
+        assert first_in_block["calibration_slope"] == pytest.approx(expected_b, abs=1e-9)
+
+
 class TestRunGateEvaluation:
     def test_runs_multiple_leagues_and_tags_each_row(self):
         e0 = _priced_matches(n_teams=6, rounds=6, league="E0", seed=1)

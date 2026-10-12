@@ -46,3 +46,26 @@ def calibration_slope_intercept(y_true: np.ndarray, p_pred: np.ndarray) -> tuple
     result = minimize(neg_log_lik, x0=np.array([0.0, 1.0]), method="Nelder-Mead")
     a, b = result.x
     return float(a), float(b)
+
+
+def apply_draw_calibration(
+    p_home: float, p_draw: float, p_away: float, intercept: float, slope: float, eps: float = 1e-6,
+) -> tuple[float, float, float]:
+    """Apply a Cox-regression correction (see calibration_slope_intercept)
+    to the draw probability only, then rescale home/away proportionally
+    so the triple still sums to 1 — this preserves the model's relative
+    home/away odds (its only basis for distinguishing them) and shifts
+    just the draw mass, matching the PID's draw-value focus.
+
+    p_draw_calibrated = sigmoid(intercept + slope * logit(p_draw)).
+    """
+    p_draw_clipped = min(max(p_draw, eps), 1 - eps)
+    z = intercept + slope * _logit(np.array([p_draw_clipped]))[0]
+    p_draw_cal = float(1.0 / (1.0 + np.exp(-z)))
+
+    scale = (1.0 - p_draw_cal) / (1.0 - p_draw_clipped)
+    p_home_cal = p_home * scale
+    p_away_cal = p_away * scale
+
+    total = p_home_cal + p_draw_cal + p_away_cal
+    return p_home_cal / total, p_draw_cal / total, p_away_cal / total
