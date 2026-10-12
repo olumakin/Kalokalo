@@ -3,8 +3,17 @@ WP3: run the gate-evaluation harness against real historical data and
 produce the go/no-go report. Composes existing, already-tested modules
 (src.validation.gate_harness/clv/three_way/calibration/gate_report,
 src.ingestion.historical/normalizer/data_loader) -- no changes to any
-shared ingestion, model, or app code. Model/feature set is untouched;
-this only evaluates what's already shipped.
+ingestion or app code, and the Dixon-Coles fit itself is untouched.
+
+By default this now also applies gate_harness's walk-forward draw-
+probability recalibration (--calibrate, on by default) on top of the
+raw model output, refit at the same cadence as the model using only
+strictly-prior resolved outcomes -- added after the first real WP3 run
+showed every league's draw probabilities were meaningfully overconfident
+(Cox slope 0.39-0.81). Pass --no-calibrate to reproduce that original,
+uncorrected baseline for comparison. The report's calibration table
+shows both the raw ("before") and corrected ("after") slope/intercept
+so the fix's effect is visible directly, not just asserted.
 
 Usage:
     python -m scripts.run_gate_evaluation --seasons-back 6
@@ -39,7 +48,11 @@ from src.ingestion.normalizer import CANONICAL_COLUMNS, load_team_mappings, reso
 from src.ingestion.data_loader import select_match_odds  # noqa: E402
 from src.validation.calibration import calibration_slope_intercept  # noqa: E402
 from src.validation.clv import evaluate_league_clv  # noqa: E402
-from src.validation.gate_harness import get_code_version, run_gate_evaluation  # noqa: E402
+from src.validation.gate_harness import (  # noqa: E402
+    DEFAULT_CALIBRATION_MIN_RESOLVED,
+    get_code_version,
+    run_gate_evaluation,
+)
 from src.validation.gate_report import compute_gate_decision, render_gate_report_markdown  # noqa: E402
 from src.validation.three_way import rps, three_way_log_loss  # noqa: E402
 
@@ -105,6 +118,15 @@ def main() -> None:
     parser.add_argument("--devig-method", default=settings["devig"]["method"])
     parser.add_argument("--cache-dir", default="data/cache/gate_eval")
     parser.add_argument("--out-dir", default=None)
+    parser.add_argument(
+        "--calibrate", dest="calibrate", action="store_true", default=True,
+        help="Walk-forward draw-probability recalibration on top of the raw model output "
+             "(default: on). Refit at the same cadence as the model, using only strictly-prior "
+             "resolved outcomes -- see gate_harness.run_league_evaluation docstring.",
+    )
+    parser.add_argument("--no-calibrate", dest="calibrate", action="store_false",
+                         help="Disable recalibration -- reproduces the pre-fix WP3 baseline run.")
+    parser.add_argument("--calibration-min-resolved", type=int, default=DEFAULT_CALIBRATION_MIN_RESOLVED)
     args = parser.parse_args()
 
     leagues = args.leagues.split(",")
@@ -117,6 +139,7 @@ def main() -> None:
     print(f"Leagues: {leagues}  Seasons: {seasons[0]}..{seasons[-1]} ({len(seasons)} seasons)")
     print(f"xi={args.xi} (uniform -- see --xi help), min_ev={args.min_ev}, "
           f"rolling_window_days={args.rolling_window_days}, retrain_every_days={args.retrain_every_days}")
+    print(f"calibrate={args.calibrate} (calibration_min_resolved={args.calibration_min_resolved})")
     print("Downloading/loading historical data...")
 
     t0 = time.time()
@@ -153,6 +176,8 @@ def main() -> None:
         min_ev=args.min_ev,
         cache_dir=args.cache_dir,
         on_retrain=on_retrain,
+        calibrate=args.calibrate,
+        calibration_min_resolved=args.calibration_min_resolved,
     )
     print(f"Evaluation finished in {time.time() - t0:.1f}s. "
           f"{len(results)} scored fixtures, {len(exclusions)} excluded.")
@@ -176,21 +201,37 @@ def main() -> None:
                     scored["actual_outcome_idx"], scored["p_home"], scored["p_draw"], scored["p_away"],
                 ),
             }
-            a, b = calibration_slope_intercept(
-                (scored["actual_outcome_idx"] == 1).to_numpy(), scored["p_draw"].to_numpy(),
-            )
-            calibration_by_league[league] = {"intercept": a, "slope": b}
+            is_draw = (scored["actual_outcome_idx"] == 1).to_numpy()
+            a_after, b_after = calibration_slope_intercept(is_draw, scored["p_draw"].to_numpy())
+            a_before, b_before = calibration_slope_intercept(is_draw, scored["p_draw_raw"].to_numpy())
+            calibration_by_league[league] = {
+                "intercept": a_after, "slope": b_after,
+                "intercept_before": a_before, "slope_before": b_before,
+                "n_calibrated": int(scored["calibration_applied"].sum()),
+            }
 
     decision = compute_gate_decision(clv_by_league)
     report_md = render_gate_report_markdown(clv_by_league, decision, exclusions, three_way_by_league)
 
     if calibration_by_league:
         report_md += "\n## Draw-probability calibration (Cox regression)\n\n"
-        report_md += "Well-calibrated: intercept ~0, slope ~1. Slope < 1 = overconfident.\n\n"
-        report_md += "| League | Intercept | Slope |\n|---|---|---|\n"
+        report_md += "Well-calibrated: intercept ~0, slope ~1. Slope < 1 = overconfident.\n"
+        report_md += (
+            f"Recalibration: {'ON' if args.calibrate else 'OFF'} "
+            f"(min_resolved={args.calibration_min_resolved}). "
+            "'Before' is the raw Dixon-Coles output; 'After' is what was actually used for "
+            "EV/qualification/CLV in this run.\n\n"
+        )
+        report_md += (
+            "| League | Intercept (before) | Slope (before) | Intercept (after) | Slope (after) | "
+            "Fixtures calibrated |\n|---|---|---|---|---|---|\n"
+        )
         for league in sorted(calibration_by_league):
             c = calibration_by_league[league]
-            report_md += f"| {league} | {c['intercept']:.3f} | {c['slope']:.3f} |\n"
+            report_md += (
+                f"| {league} | {c['intercept_before']:.3f} | {c['slope_before']:.3f} | "
+                f"{c['intercept']:.3f} | {c['slope']:.3f} | {c['n_calibrated']} |\n"
+            )
 
     results.to_csv(out_dir / "results.csv", index=False)
     exclusions.to_csv(out_dir / "exclusions.csv", index=False)
