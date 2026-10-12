@@ -284,6 +284,111 @@ class TestWalkForwardCalibration:
         assert first_in_block["calibration_slope"] == pytest.approx(expected_b, abs=1e-9)
 
 
+def _regime_shift_matches(n_teams=6, rounds_per_regime=4, seed=11, league="E0", season="2324", start="2020-08-01"):
+    """First half: the same forced-draw bias as _skewed_matches, so the
+    raw model is overconfident. Second half: no forced bias (natural
+    Poisson draw rate), so a calibration fit using *only* this regime
+    should converge back toward the identity (slope ~1) -- unlike one
+    still carrying the first regime's bias in an all-time average.
+    Exercises calibration_window_days: a rolling fit should track the
+    regime change faster than the default all-time expanding fit.
+    """
+    rng = np.random.default_rng(seed)
+    teams = [f"T{i:02d}" for i in range(n_teams)]
+    rows = []
+    start_ts = pd.Timestamp(start, tz="UTC")
+    day = 0
+    for regime in ("biased", "natural"):
+        for _ in range(rounds_per_regime):
+            for home in teams:
+                for away in teams:
+                    if home == away:
+                        continue
+                    if regime == "biased" and rng.random() < 0.55:
+                        hg = ag = int(rng.poisson(1.1))
+                    else:
+                        hg, ag = int(rng.poisson(1.4)), int(rng.poisson(1.1))
+                    close_d = float(rng.uniform(3.0, 3.6))
+                    rows.append({
+                        "date": start_ts + pd.Timedelta(days=day), "league": league, "season": season,
+                        "home_team": home, "away_team": away, "home_goals": hg, "away_goals": ag,
+                        "result": "H" if hg > ag else ("A" if hg < ag else "D"),
+                        "entry_home": 2.0, "entry_draw": close_d, "entry_away": 3.8,
+                        "entry_source": "Pinnacle (opening)",
+                        "close_home": 2.0, "close_draw": close_d, "close_away": 3.8,
+                        "close_source": "Pinnacle closing", "retail_draw": close_d,
+                    })
+                    day += 1
+    return pd.DataFrame(rows)
+
+
+class TestRollingCalibrationWindow:
+    @pytest.fixture(scope="class")
+    def matches(self):
+        return _regime_shift_matches(rounds_per_regime=5)
+
+    @pytest.fixture(scope="class")
+    def all_time(self, matches):
+        return run_league_evaluation(
+            matches, "E0", xi=0.0065, min_train_matches=30, calibrate=True, calibration_min_resolved=50,
+        )[0]
+
+    @pytest.fixture(scope="class")
+    def windowed(self, matches):
+        return run_league_evaluation(
+            matches, "E0", xi=0.0065, min_train_matches=30, calibrate=True, calibration_min_resolved=50,
+            calibration_window_days=90,
+        )[0]
+
+    def test_rolling_window_tracks_the_regime_change_faster(self, all_time, windowed):
+        # Compare held-out draw log-loss on the same late rows (well
+        # into the "natural"/unbiased regime) rather than the raw
+        # calibration_slope coefficient directly: a single small-window
+        # Cox fit is itself a 2-parameter MLE and can be noisy (slope
+        # estimates with real variance, not just a point to compare
+        # bias against) -- log-loss over many rows averages that noise
+        # out and measures what actually matters, whether the applied
+        # probabilities are good predictions of the outcomes that
+        # followed, which a windowed fit tracking the regime change
+        # should do better at than one still diluted by the stale
+        # biased-regime data baked into the all-time average.
+        late_all_time = all_time.iloc[-60:]
+        late_windowed = windowed.iloc[-60:]
+        assert (late_all_time["date"].to_numpy() == late_windowed["date"].to_numpy()).all()
+
+        y = (late_all_time["actual_outcome_idx"] == 1).to_numpy().astype(float)
+
+        def draw_log_loss(p_draw: np.ndarray) -> float:
+            p = np.clip(p_draw, 1e-9, 1 - 1e-9)
+            return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
+
+        assert draw_log_loss(late_windowed["p_draw"].to_numpy()) < draw_log_loss(late_all_time["p_draw"].to_numpy())
+
+    def test_windowed_calibration_uses_only_outcomes_within_the_window(self, windowed):
+        # Leakage/window guard: the calibration applied to a given row
+        # must come from a fit over resolved outcomes within
+        # calibration_window_days of that row's date, not the full
+        # history -- same idea as the all-time leakage test, but
+        # checking the window boundary is actually enforced.
+        from src.validation.calibration import calibration_slope_intercept
+
+        applied = windowed[windowed["calibration_applied"]].sort_values("date")
+        assert not applied.empty
+        block_start_idx = applied["calibration_slope"].ne(applied["calibration_slope"].shift()).to_numpy()
+        first_in_block = applied[block_start_idx].iloc[-1]  # a later block, well past the regime shift
+
+        window_start = first_in_block["date"] - pd.Timedelta(days=90)
+        prior_in_window = windowed[
+            (windowed["date"] < first_in_block["date"]) & (windowed["date"] >= window_start)
+        ]
+        expected_a, expected_b = calibration_slope_intercept(
+            (prior_in_window["actual_outcome_idx"] == 1).to_numpy().astype(float),
+            prior_in_window["p_draw_raw"].to_numpy(),
+        )
+        assert first_in_block["calibration_intercept"] == pytest.approx(expected_a, abs=1e-9)
+        assert first_in_block["calibration_slope"] == pytest.approx(expected_b, abs=1e-9)
+
+
 class TestRunGateEvaluation:
     def test_runs_multiple_leagues_and_tags_each_row(self):
         e0 = _priced_matches(n_teams=6, rounds=6, league="E0", seed=1)

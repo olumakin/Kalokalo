@@ -15,6 +15,14 @@ uncorrected baseline for comparison. The report's calibration table
 shows both the raw ("before") and corrected ("after") slope/intercept
 so the fix's effect is visible directly, not just asserted.
 
+The calibration refit defaults to an all-time expanding window. If a
+league's slope stays poor even with a large accumulated sample (not a
+small-n problem), pass --calibration-window-days to test whether the
+miscalibration is instead non-stationary -- e.g. --calibration-window-
+days 730 to match the model's own --rolling-window-days and see if
+tracking recent form specifically, rather than the whole history,
+improves it.
+
 Usage:
     python -m scripts.run_gate_evaluation --seasons-back 6
 
@@ -127,6 +135,12 @@ def main() -> None:
     parser.add_argument("--no-calibrate", dest="calibrate", action="store_false",
                          help="Disable recalibration -- reproduces the pre-fix WP3 baseline run.")
     parser.add_argument("--calibration-min-resolved", type=int, default=DEFAULT_CALIBRATION_MIN_RESOLVED)
+    parser.add_argument(
+        "--calibration-window-days", type=int, default=None,
+        help="Restrict each calibration refit to resolved outcomes within this many days of the "
+             "current retrain point, instead of the default all-time expanding window -- mirrors "
+             "--rolling-window-days for the model itself. Omit for the default all-time behavior.",
+    )
     args = parser.parse_args()
 
     leagues = args.leagues.split(",")
@@ -139,7 +153,8 @@ def main() -> None:
     print(f"Leagues: {leagues}  Seasons: {seasons[0]}..{seasons[-1]} ({len(seasons)} seasons)")
     print(f"xi={args.xi} (uniform -- see --xi help), min_ev={args.min_ev}, "
           f"rolling_window_days={args.rolling_window_days}, retrain_every_days={args.retrain_every_days}")
-    print(f"calibrate={args.calibrate} (calibration_min_resolved={args.calibration_min_resolved})")
+    print(f"calibrate={args.calibrate} (calibration_min_resolved={args.calibration_min_resolved}, "
+          f"calibration_window_days={args.calibration_window_days or 'all-time'})")
     print("Downloading/loading historical data...")
 
     t0 = time.time()
@@ -178,6 +193,7 @@ def main() -> None:
         on_retrain=on_retrain,
         calibrate=args.calibrate,
         calibration_min_resolved=args.calibration_min_resolved,
+        calibration_window_days=args.calibration_window_days,
     )
     print(f"Evaluation finished in {time.time() - t0:.1f}s. "
           f"{len(results)} scored fixtures, {len(exclusions)} excluded.")
@@ -218,7 +234,8 @@ def main() -> None:
         report_md += "Well-calibrated: intercept ~0, slope ~1. Slope < 1 = overconfident.\n"
         report_md += (
             f"Recalibration: {'ON' if args.calibrate else 'OFF'} "
-            f"(min_resolved={args.calibration_min_resolved}). "
+            f"(min_resolved={args.calibration_min_resolved}, "
+            f"window={args.calibration_window_days or 'all-time'} days). "
             "'Before' is the raw Dixon-Coles output; 'After' is what was actually used for "
             "EV/qualification/CLV in this run.\n\n"
         )

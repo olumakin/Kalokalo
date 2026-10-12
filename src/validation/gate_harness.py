@@ -160,6 +160,7 @@ def run_league_evaluation(
     on_retrain: Callable[[pd.Timestamp, pd.DataFrame], None] | None = None,
     calibrate: bool = False,
     calibration_min_resolved: int = DEFAULT_CALIBRATION_MIN_RESOLVED,
+    calibration_window_days: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Strict chronological walk-forward evaluation for one league.
 
@@ -170,12 +171,23 @@ def run_league_evaluation(
     outcomes strictly before the current retrain point (same no-leakage
     discipline as model training -- see the leakage tests in
     tests/test_gate_harness.py). Below `calibration_min_resolved`
-    accumulated outcomes, predictions pass through uncalibrated
-    (intercept=0, slope=1) rather than fit a curve too noisy to trust.
-    `p_draw`/`p_home`/`p_away` (and the EV/qualified decision derived
-    from them) reflect the calibrated probabilities when this is on;
-    the pre-calibration draw probability is kept in `p_draw_raw` for
-    before/after comparison.
+    accumulated outcomes (within the window, if one is set), predictions
+    pass through uncalibrated (intercept=0, slope=1), or keep whatever
+    calibration was last fit, rather than fit a curve too noisy to
+    trust. `p_draw`/`p_home`/`p_away` (and the EV/qualified decision
+    derived from them) reflect the calibrated probabilities when this
+    is on; the pre-calibration draw probability is kept in `p_draw_raw`
+    for before/after comparison.
+
+    `calibration_window_days`, if set, restricts each calibration refit
+    to resolved outcomes within that many days of the current retrain
+    point, mirroring `rolling_window_days` for the model itself rather
+    than the default all-time expanding window. An all-time fit assumes
+    the model's miscalibration pattern is stationary across the whole
+    evaluation period; a league with real squad/market turnover (newly
+    promoted teams, a market getting sharper over time) may instead
+    need calibration to track recent behavior specifically, the same
+    reasoning `rolling_window_days` already applies to team strength.
 
     `on_retrain`, if given, is called as `on_retrain(current_date,
     train_df)` at every retrain *attempt* (whether or not it succeeds),
@@ -226,13 +238,15 @@ def run_league_evaluation(
 
     # Walk-forward calibration state: (intercept, slope), None until
     # calibration_min_resolved resolved outcomes have accumulated.
-    # resolved_p_draw/resolved_is_draw only ever receive rows from a
-    # *previous* current_date iteration (appended at the end of the
-    # loop body below), so refitting here, before this iteration's own
-    # day_matches are scored, cannot see today's or any future outcome.
+    # resolved_p_draw/resolved_is_draw/resolved_dates only ever receive
+    # rows from a *previous* current_date iteration (appended at the
+    # end of the loop body below), so refitting here, before this
+    # iteration's own day_matches are scored, cannot see today's or any
+    # future outcome.
     current_calibration: tuple[float, float] | None = None
     resolved_p_draw: list[float] = []
     resolved_is_draw: list[int] = []
+    resolved_dates: list[pd.Timestamp] = []
 
     for current_date in unique_dates:
         needs_retrain = (
@@ -267,10 +281,24 @@ def run_league_evaluation(
                     prev_team_params = {t: (model.alpha_[t], model.beta_[t]) for t in model.teams_}
             last_train_date = current_date
 
-            if calibrate and len(resolved_p_draw) >= calibration_min_resolved:
-                a, b = calibration_slope_intercept(np.array(resolved_is_draw), np.array(resolved_p_draw))
-                if not (np.isnan(a) or np.isnan(b)):
-                    current_calibration = (a, b)
+            if calibrate:
+                if calibration_window_days is not None and resolved_dates:
+                    # resolved_dates holds pd.Timestamp objects; guarded
+                    # on non-empty because np.array([]) defaults to
+                    # float64, and comparing that against a Timestamp
+                    # raises rather than producing an all-False mask.
+                    window_start_calib = current_date - pd.Timedelta(days=calibration_window_days)
+                    in_window = np.array(resolved_dates) >= window_start_calib
+                    calib_p_draw = np.array(resolved_p_draw)[in_window]
+                    calib_is_draw = np.array(resolved_is_draw)[in_window]
+                else:
+                    calib_p_draw = np.array(resolved_p_draw)
+                    calib_is_draw = np.array(resolved_is_draw)
+
+                if len(calib_p_draw) >= calibration_min_resolved:
+                    a, b = calibration_slope_intercept(calib_is_draw, calib_p_draw)
+                    if not (np.isnan(a) or np.isnan(b)):
+                        current_calibration = (a, b)
 
         day_matches = df[df["date"] == current_date]
         for _, row in day_matches.iterrows():
@@ -348,6 +376,7 @@ def run_league_evaluation(
             if calibrate:
                 resolved_p_draw.append(p_draw_raw)
                 resolved_is_draw.append(1 if actual_idx == 1 else 0)
+                resolved_dates.append(row["date"])
 
     results_df = pd.DataFrame(results, columns=RESULTS_COLUMNS) if results else pd.DataFrame(columns=RESULTS_COLUMNS)
     exclusions_df = (
