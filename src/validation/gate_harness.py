@@ -110,8 +110,25 @@ def _default_fit_func(
     )
 
 
-def _cache_key(league: str, matchweek_start: str, xi: float, code_version: str) -> str:
-    raw = f"{league}|{matchweek_start}|{xi:.6f}|{code_version}"
+def _cache_key(
+    league: str, matchweek_start: str, xi: float, code_version: str,
+    rolling_window_days: int, min_matches_per_team: int, method: str, max_iter: int,
+) -> str:
+    """Must include every parameter that affects train_df's content or
+    the fit call's own hyperparameters, not just league/date/xi/code --
+    rolling_window_days changes which rows land in train_df for the
+    same (league, matchweek_start), so two runs that differ only in
+    window length must never collide on the same cache entry (found
+    when two runs at different --rolling-window-days shared the
+    default --cache-dir: the second would have silently reused fits
+    trained on the first's window). retrain_every_days/min_train_matches
+    are deliberately left out -- they only affect *whether* a retrain
+    happens at a given date, not what train_df contains once it does.
+    """
+    raw = (
+        f"{league}|{matchweek_start}|{xi:.6f}|{code_version}|"
+        f"{rolling_window_days}|{min_matches_per_team}|{method}|{max_iter}"
+    )
     return hashlib.sha1(raw.encode()).hexdigest()  # noqa: S324 — cache key, not a security boundary
 
 
@@ -248,7 +265,10 @@ def run_league_evaluation(
             if len(train_df) < min_train_matches:
                 model = None
             else:
-                key = _cache_key(league, str(current_date.date()), xi, code_version)
+                key = _cache_key(
+                    league, str(current_date.date()), xi, code_version,
+                    rolling_window_days, min_matches_per_team, method, max_iter,
+                )
                 cached = _load_cached_model(cache_dir, key)
                 if cached is not None:
                     model = cached

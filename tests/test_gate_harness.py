@@ -178,6 +178,33 @@ class TestRunLeagueEvaluation:
         # (and therefore the optimizer) is never called again.
         assert calls["n"] == first_calls
 
+    def test_cache_is_not_reused_across_different_rolling_window_days(self, tmp_path):
+        # Two runs sharing a cache_dir but differing only in
+        # rolling_window_days must not collide: train_df's content
+        # depends on the window, so a cache hit here would silently
+        # serve fits trained on the *other* run's window.
+        matches = _priced_matches(n_teams=6, rounds=6)
+        calls = {"n": 0}
+
+        def counting_fit_func(train_df, xi, warm_start, max_iter, min_matches, method):
+            calls["n"] += 1
+            return _default_fit_func(train_df, xi, warm_start, max_iter, min_matches, method)
+
+        run_league_evaluation(
+            matches, "E0", xi=0.0065, fit_func=counting_fit_func, min_train_matches=50,
+            cache_dir=tmp_path, code_version="test-version", rolling_window_days=730,
+        )
+        first_calls = calls["n"]
+        assert first_calls > 0
+
+        run_league_evaluation(
+            matches, "E0", xi=0.0065, fit_func=counting_fit_func, min_train_matches=50,
+            cache_dir=tmp_path, code_version="test-version", rolling_window_days=1095,
+        )
+        # A different window must refit at every retrain point, not
+        # silently reuse the 730-day run's cached fits.
+        assert calls["n"] > first_calls
+
 
 def _skewed_matches(n_teams=6, rounds=5, seed=7, league="E0", season="2324", start="2020-08-01"):
     # Heavier draw rate than the model's own Poisson implies (close
