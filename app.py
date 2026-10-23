@@ -17,6 +17,7 @@ import os
 import pandas as pd
 import streamlit as st
 
+from src.analytics.edge import calculate_ev
 from src.ingestion.historical import load_settings
 from src.ingestion.normalizer import build_display_names, load_team_mappings
 from src.ingestion.odds_feed import (
@@ -111,6 +112,35 @@ CARD_CSS = """
         font-weight: 700;
         letter-spacing: 0.05em;
     }
+    .badge-proceed {
+        background: rgba(16, 185, 129, 0.25);
+        color: #10b981;
+        border: 1px solid #059669;
+        padding: 3px 10px;
+        border-radius: 9999px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+    }
+    .fair-price-box {
+        background: rgba(15, 23, 42, 0.8);
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin: 12px 0;
+    }
+    .fair-price-label {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        color: #34d399;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+    }
+    .fair-price-value {
+        font-size: 1.3rem;
+        font-weight: 800;
+        color: #f8fafc;
+    }
     .score-box {
         background: rgba(15, 23, 42, 0.8);
         border: 1px solid #334155;
@@ -171,6 +201,11 @@ def _format_age(delta: pd.Timedelta) -> str:
 @st.cache_data(show_spinner=False, ttl="2m")
 def _cached_latest_predictions() -> pd.DataFrame:
     return fetch_latest_predictions()
+
+
+@st.cache_data(show_spinner=False, ttl="2m")
+def _cached_gate_status() -> dict:
+    return fetch_gate_status()
 
 
 @st.cache_data(show_spinner=False, ttl="6h")
@@ -423,10 +458,12 @@ else:
             )
         display_df = display_df.head(card_limit)
 
-        # Shadow stakes are admin-only, and only for a league whose gate
-        # is explicitly approved (status='proceed' and approved_at set).
-        # With the seeded defaults this is empty for every league.
-        gate_status = fetch_gate_status() if admin else {}
+        # Gate status is read for every visitor now, not just admin: the
+        # public cards themselves need it to tell a WP3-cleared league
+        # (fair price + "your price" shown) from a forecast-only one
+        # (src.validation.gate_report.compute_gate_decision is where
+        # "cleared" is actually decided; this just reads the result).
+        gate_status = _cached_gate_status()
         now_utc = pd.Timestamp.now(tz="UTC")
 
         rows = list(display_df.iterrows())
@@ -435,9 +472,20 @@ else:
             cols = st.columns(2)
             for col, (_, match) in zip(cols, pair):
                 with col, st.container(border=True):
+                    league_gate = gate_status.get(match["league"], {})
+                    league_proceeds = league_gate.get("status") == "proceed" and bool(league_gate.get("approved_at"))
+
                     is_high_tie = match["p_draw"] >= HIGH_TIE_P_DRAW
                     tie_badge_class = "badge-draw-high" if is_high_tie else "badge-draw-med"
-                    tie_badge_label = "HIGH TIE POTENTIAL" if is_high_tie else "MODERATE TIE CHANCE"
+                    if league_proceeds:
+                        tie_badge_label = "HIGH TIE POTENTIAL" if is_high_tie else "MODERATE TIE CHANCE"
+                        status_badge_class, status_badge_label = "badge-proceed", "VALIDATED EDGE"
+                    else:
+                        # No "potential"/opportunity wording for a league
+                        # the gate hasn't cleared -- that implies an edge
+                        # claim this league doesn't have evidence for.
+                        tie_badge_label = "HIGH DRAW LIKELIHOOD" if is_high_tie else "MODERATE DRAW LIKELIHOOD"
+                        status_badge_class, status_badge_label = "badge-forecast-only", "FORECAST ONLY"
 
                     date_str = pd.to_datetime(match["match_date"]).strftime("%a, %b %d")
                     league_full = settings["leagues"].get(match["league"], match["league"])
@@ -446,7 +494,7 @@ else:
                         f"<span class='league-pill'>{league_full} • {date_str}</span>"
                         f"<span>"
                         f"<span class='{tie_badge_class}'>{tie_badge_label}</span>"
-                        f"<span class='badge-forecast-only' style='margin-left:6px;'>FORECAST ONLY</span>"
+                        f"<span class='{status_badge_class}' style='margin-left:6px;'>{status_badge_label}</span>"
                         f"</span>"
                         f"</div>",
                         unsafe_allow_html=True,
@@ -492,15 +540,44 @@ else:
                     age = now_utc - match["created_at"]
                     st.caption(f"Priced {_format_age(age)} ago · {match.get('entry_source') or 'unknown source'}")
 
-                    if admin:
-                        league_gate = gate_status.get(match["league"], {})
-                        if league_gate.get("status") == "proceed" and league_gate.get("approved_at"):
-                            with st.expander("Shadow: not validated"):
-                                stake = match.get("stake_shadow")
-                                ev = match.get("ev_entry")
-                                ev_str = f"EV {ev:+.1%}" if pd.notna(ev) else "EV n/a"
-                                stake_str = f", stake {stake:.1%} of bankroll" if pd.notna(stake) else ""
-                                st.caption(f"{ev_str}{stake_str} — shadow figure, not a validated recommendation.")
+                    # Fair price + "your price": public, platform-agnostic
+                    # (no assumption about which bookmaker's feed a visitor
+                    # actually uses), and scoped to leagues the gate has
+                    # actually cleared -- a forecast-only league gets no
+                    # edge-shaped number here, just the forecast above.
+                    if league_proceeds and match["p_draw"] > 0:
+                        fair_price = 1.0 / match["p_draw"]
+                        st.markdown(
+                            f"""
+                                <div class="fair-price-box">
+                                    <div class="fair-price-label">Model Fair Price (Draw)</div>
+                                    <div class="fair-price-value">{fair_price:.2f}</div>
+                                    <div style="font-size:0.78rem; color:#94a3b8; margin-top:2px;">
+                                        Breakeven decimal odds for a draw bet, per this league's
+                                        WP3-validated model. Not tied to any one bookmaker.
+                                    </div>
+                                </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                        your_price = st.number_input(
+                            "Your price (draw odds on your own platform)",
+                            min_value=1.01, step=0.01, value=None,
+                            key=f"your_price_{match['fixture_id']}",
+                            help="Enter the draw odds you're actually being offered, wherever you check "
+                                 "them -- this doesn't assume a specific bookmaker's feed.",
+                        )
+                        if your_price:
+                            your_ev = calculate_ev(match["p_draw"], your_price)
+                            st.caption(f"Your edge at that price: **{your_ev:+.1%}** EV — informational only, not a bet recommendation.")
+
+                    if admin and league_proceeds:
+                        with st.expander("Shadow: not validated"):
+                            stake = match.get("stake_shadow")
+                            ev = match.get("ev_entry")
+                            ev_str = f"EV {ev:+.1%}" if pd.notna(ev) else "EV n/a"
+                            stake_str = f", stake {stake:.1%} of bankroll" if pd.notna(stake) else ""
+                            st.caption(f"{ev_str}{stake_str} — shadow figure, not a validated recommendation.")
 
         public_cols = [
             "match_date", "league", "home_id", "away_id", "p_home", "p_draw", "p_away",
