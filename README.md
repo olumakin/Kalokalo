@@ -22,8 +22,14 @@ pip install -r requirements.txt
 Run the end-to-end pipeline against a fixture card:
 
 ```bash
-python -m src.pipeline --fixtures data/fixtures/upcoming.csv --leagues E0,SP1,I1,D1,F1 --seasons-back 2
+python -m src.pipeline --fixtures data/fixtures/upcoming.csv --leagues E0,SP1,I1,D1,F1
 ```
+
+Locked to the WP3-validated 730-day rolling window by default (`--window-days`
+overrides it for an experiment; `--seasons-back` only controls how many whole
+season CSVs get fetched and is bumped up automatically if it wouldn't cover
+the window). A run at anything other than the validated window is recorded as
+such and shows as forecast-only in the live app, regardless of gate_status.
 
 Launch the web dashboard:
 

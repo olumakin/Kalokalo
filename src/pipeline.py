@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 from datetime import date
 
 import pandas as pd
@@ -251,11 +252,32 @@ def record_predictions_to_supabase(
     return {"run_id": run_id, "status": status, "failed": failed}
 
 
-def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path: str | None = None) -> pd.DataFrame:
-    """CLI entry path: download historical data, fit, score a fixture CSV, log to ledger."""
-    settings = load_settings() if settings_path is None else yaml.safe_load(open(settings_path))
+def run(
+    fixtures_path: str, leagues: list[str], seasons_back: int,
+    settings_path: str | None = None, window_days: int | None = None,
+) -> pd.DataFrame:
+    """CLI entry path: download historical data, fit, score a fixture CSV, log to ledger.
 
-    matches = load_historical_matches(leagues, seasons_back, settings)
+    This writes to the same production predictions table app.py's admin
+    "Run pipeline" button does, so it's locked to the same validated
+    window the same way: `window_days` defaults to the WP3-validated
+    settings.model.rolling_window_days (730) rather than whatever
+    `seasons_back` whole-season loading happens to span. Pass a
+    different `window_days` only to deliberately run an experiment --
+    the resulting predictions are logged with that window_days, so
+    app.py's public gate correctly shows them as forecast-only rather
+    than silently treating a CLI run as validated just because it came
+    from this entry point instead of the admin button.
+
+    `seasons_back` is bumped up automatically if it wouldn't cover
+    `window_days` worth of raw data -- it only controls how many whole
+    season CSVs get fetched, not the window itself.
+    """
+    settings = load_settings() if settings_path is None else yaml.safe_load(open(settings_path))
+    window_days = window_days if window_days is not None else settings["model"]["rolling_window_days"]
+    seasons_back = max(seasons_back, math.ceil(window_days / 365) + 1)
+
+    matches = load_historical_matches(leagues, seasons_back, settings, window_days=window_days)
     if matches.empty:
         logger.error("No historical matches available; cannot fit model. Populate data/historical/ or check network access.")
         return pd.DataFrame()
@@ -268,7 +290,9 @@ def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path
         return pd.DataFrame()
 
     predictions = build_predictions(fixtures, models, settings)
-    result = record_predictions_to_supabase(predictions, models, settings, price_source="cli_fixture_csv")
+    result = record_predictions_to_supabase(
+        predictions, models, settings, price_source="cli_fixture_csv", window_days=window_days,
+    )
     logger.info("Supabase ledger: %s (run_id=%s, failed=%d)", result["status"], result["run_id"], result["failed"])
     return predictions
 
@@ -277,11 +301,19 @@ def main():
     parser = argparse.ArgumentParser(description="DVPE Football Big 5 pipeline")
     parser.add_argument("--fixtures", default="data/fixtures/upcoming.csv", help="Path to fixture-card CSV")
     parser.add_argument("--leagues", default="E0,SP1,I1,D1,F1", help="Comma-separated league codes")
-    parser.add_argument("--seasons-back", type=int, default=2, help="Number of prior seasons to ingest")
+    parser.add_argument(
+        "--seasons-back", type=int, default=2,
+        help="Minimum prior seasons to ingest -- bumped up automatically if it wouldn't cover --window-days",
+    )
+    parser.add_argument(
+        "--window-days", type=int, default=None,
+        help="Rolling window length in days; defaults to the WP3-validated config value (730). "
+             "A non-default value is recorded as such and shows as forecast-only in the live app.",
+    )
     args = parser.parse_args()
 
     leagues = args.leagues.split(",")
-    predictions = run(args.fixtures, leagues, args.seasons_back)
+    predictions = run(args.fixtures, leagues, args.seasons_back, window_days=args.window_days)
 
     if predictions.empty:
         print("No predictions generated.")
