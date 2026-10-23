@@ -53,6 +53,7 @@ from src.validation.gate_harness import (  # noqa: E402
     get_code_version,
     run_gate_evaluation,
 )
+from src.validation.blend import compare_model_market_blend  # noqa: E402
 from src.validation.gate_report import compute_gate_decision, render_gate_report_markdown  # noqa: E402
 from src.validation.three_way import rps, three_way_log_loss  # noqa: E402
 
@@ -182,7 +183,7 @@ def main() -> None:
     print(f"Evaluation finished in {time.time() - t0:.1f}s. "
           f"{len(results)} scored fixtures, {len(exclusions)} excluded.")
 
-    clv_by_league, three_way_by_league, calibration_by_league = {}, {}, {}
+    clv_by_league, three_way_by_league, calibration_by_league, blend_by_league = {}, {}, {}, {}
     for league in leagues:
         league_results = results[results["league"] == league]
         if league_results.empty:
@@ -209,6 +210,13 @@ def main() -> None:
                 "intercept_before": a_before, "slope_before": b_before,
                 "n_calibrated": int(scored["calibration_applied"].sum()),
             }
+            priced_scored = scored.dropna(subset=["market_p_home", "market_p_draw", "market_p_away"])
+            if not priced_scored.empty:
+                blend_by_league[league] = compare_model_market_blend(
+                    priced_scored["actual_outcome_idx"],
+                    priced_scored["p_home"], priced_scored["p_draw"], priced_scored["p_away"],
+                    priced_scored["market_p_home"], priced_scored["market_p_draw"], priced_scored["market_p_away"],
+                )
 
     decision = compute_gate_decision(clv_by_league)
     report_md = render_gate_report_markdown(clv_by_league, decision, exclusions, three_way_by_league)
@@ -231,6 +239,26 @@ def main() -> None:
             report_md += (
                 f"| {league} | {c['intercept_before']:.3f} | {c['slope_before']:.3f} | "
                 f"{c['intercept']:.3f} | {c['slope']:.3f} | {c['n_calibrated']} |\n"
+            )
+
+    if blend_by_league:
+        report_md += "\n## Step 7: model vs. market vs. blend (3-way log-loss)\n\n"
+        report_md += (
+            "Descriptive, not a gate: does ensembling the model with the de-vigged market "
+            "beat either alone? Best blend weight near 1.0 = market adds nothing; near 0.0 = "
+            "the model adds nothing; an interior optimum with a lower log-loss than both "
+            "endpoints is the sign an ensemble would help in production.\n\n"
+        )
+        report_md += (
+            "| League | n | Model log-loss | Market log-loss | Best blend weight (model) | "
+            "Best blend log-loss | Blend beats both |\n|---|---|---|---|---|---|---|\n"
+        )
+        for league in sorted(blend_by_league):
+            b = blend_by_league[league]
+            report_md += (
+                f"| {league} | {b['n']} | {b['model_log_loss']:.4f} | {b['market_log_loss']:.4f} | "
+                f"{b['best_blend_weight']:.2f} | {b['best_blend_log_loss']:.4f} | "
+                f"{'yes' if b['blend_beats_both'] else 'no'} |\n"
             )
 
     results.to_csv(out_dir / "results.csv", index=False)
