@@ -91,7 +91,10 @@
   seeds all five leagues to `inconclusive`; a shadow stake is computed and
   stored on every admin run (so the pipeline itself never blocks), but is
   only *rendered* in the admin UI when `status == 'proceed' AND
-  approved_at IS NOT NULL` — currently true for none of them.
+  approved_at IS NOT NULL`. The WP3 gate-evaluation harness has since run
+  against the full historical corpus and cleared E0/F1/I1/D1 on CLV (see
+  README's "Status"); flipping their `gate_status` rows to `proceed` is
+  the manual DB step above, done independently of any code or deploy.
 - **xG/Understat is present in the repo but not reachable from any live
   code path** (`src/ingestion/understat_xg.py`, `sources.py`) — deferred
   to WP8, verified by grep-based tests

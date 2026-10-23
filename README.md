@@ -242,6 +242,34 @@ keeps working).
   numeric bounds (never a pre-formatted string), so it stays
   machine-actionable; `render_gate_report_markdown` formats the result.
 
+**Running it**: `python -m scripts.run_gate_evaluation --seasons-back 6` is
+the CLI driver — downloads/loads the historical corpus, runs
+`run_gate_evaluation` across every configured league, and writes
+`results.csv`/`exclusions.csv`/`gate_report.md` to a timestamped
+directory under `data/gate_reports/`. Model fits are cached to
+`--cache-dir` (default `data/cache/gate_eval`), so re-running with a
+different `--min-ev` after reviewing results doesn't refit identical
+work. `--xi` applies one value uniformly across leagues (the per-league
+grid search isn't wired into this harness yet, only into `settings.yaml`).
+
+**Draw-probability recalibration**: the first full run showed every
+league's draw probabilities meaningfully overconfident (Cox slope
+0.39–0.81 — see `calibration.py` above). `apply_draw_calibration`
+(same module) corrects this walk-forward, inside `gate_harness.py`
+itself: refit at the same cadence as the model, using only resolved
+outcomes strictly before the current retrain point, with an identity
+passthrough below `--calibration-min-resolved` (default 100)
+accumulated outcomes so an early, noisy fit can't distort anything.
+`--calibrate` is on by default; `--no-calibrate` reproduces the
+original, uncorrected baseline for comparison. A rolling-window variant
+(refitting on only the last N days, mirroring `rolling_window_days` for
+the model itself, to test whether a league's poor slope was a
+staleness artifact rather than genuine) was built, tested, and
+discarded — on real data it made every league's slope *worse*, not
+better, since a shorter window just means a noisier fit on less data.
+That result is the reason the harness only supports the all-time
+expanding window today.
+
 **Known gaps, not yet built**: COVID-season (2019/20 run-in, 2020/21)
 flagging in the report — home-advantage estimates spanning those
 matches are overstated and the by-season breakdown (`results["season"]`
@@ -469,10 +497,26 @@ controlling staking eligibility per league (seeded to `inconclusive`
 for all five), age gate + Terms of Use + Responsible Gambling notices,
 and CSV upload / offline demo data / Understat xG removed from the
 live app entirely (see "Removed from the live app" and "Public
-deployment & admin auth" above). Per the WP1/WP2 evidence-pack gate,
-WP3 has not yet been run against the full historical corpus, and no
-league's `gate_status` has been set to `proceed` — every shadow stake
-is computed and stored but hidden from the admin UI.
+deployment & admin auth" above).
+
+WP3 has now been run against the full historical corpus (6 seasons,
+5 leagues, 10,984 raw rows): decision `proceed_with_leagues` for E0,
+F1, I1, and D1 (each clears a positive lower CLV bound on its flagged
+bets); SP1 remains `inconclusive` (its CI still straddles zero).
+D1's flagged CLV clears, but its draw-probability calibration slope
+stays weak (~0.45 of the ~1.0 ideal) even after the recalibration fix
+above — real edge, unreliable confidence in exactly how large that
+edge is. `edge.calibration_stake_multiplier` in `config/settings.yaml`
+halves D1's Kelly stake specifically as a stopgap tied to that measured
+weakness (`src/pipeline.py`'s `build_predictions`, which both the CLI
+and the live app call), not a general risk dial — every other league
+defaults to no discount.
+
+Flipping `gate_status` to `proceed` for the cleared leagues in
+Supabase is still a manual, human step (by design — see "Staking gate"
+above) and, as of this writing, hasn't been confirmed done; every
+shadow stake is computed and stored regardless, but stays hidden from
+the admin UI until that row is set.
 
 Not yet wired: the `xi` decay grid search itself, which is exposed as a
 config surface (`model.xi_grid` in `config/settings.yaml`) for the
