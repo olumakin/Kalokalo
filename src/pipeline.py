@@ -115,8 +115,38 @@ def build_predictions(fixtures: pd.DataFrame, models: dict[str, DixonColesModel]
     return df.sort_values("ev", ascending=False).reset_index(drop=True)
 
 
-def load_historical_matches(leagues: list[str], seasons_back: int, settings: dict) -> pd.DataFrame:
-    """Download (or read from cache) and normalize Big 5 historical results."""
+def trim_to_rolling_window(
+    matches: pd.DataFrame, window_days: int, as_of: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Restrict `matches` to a strict rolling window ending at `as_of`
+    (default: now) -- the exact window logic WP3's validated harness
+    applies at each retrain step (src.validation.gate_harness
+    .run_league_evaluation: `date < current_date and date >= current_date
+    - window_days`), so the live pipeline's training window is the one
+    WP3 actually evaluated, not however many whole seasons happened to
+    be downloaded. Confirmed these differ in practice: at seasons_back=2
+    (the old admin default), whole-season loading pulled ~395 extra,
+    older matches a strict 730-day window would already have rolled off
+    (11% more data, all outside what WP3 validated).
+    """
+    as_of = as_of or pd.Timestamp.now(tz="UTC")
+    window_start = as_of - pd.Timedelta(days=window_days)
+    dates = pd.to_datetime(matches["date"], utc=True)
+    return matches[(dates < as_of) & (dates >= window_start)]
+
+
+def load_historical_matches(
+    leagues: list[str], seasons_back: int, settings: dict, window_days: int | None = None,
+) -> pd.DataFrame:
+    """Download (or read from cache) and normalize Big 5 historical
+    results, then -- if `window_days` is given -- trim to a strict
+    rolling window of that many days ending now (trim_to_rolling_window
+    above). `seasons_back` only controls how many whole-season CSVs get
+    fetched; the caller is responsible for it covering at least
+    `window_days` (callers deriving window_days from the validated
+    config should size seasons_back from the same number, not pick it
+    independently -- see app.py's admin "Historical window" control).
+    """
     end_year = date.today().year
     seasons = season_codes(end_year - seasons_back, end_year)
     logger.info("Ingesting historical data for %s / seasons %s", leagues, seasons)
@@ -128,6 +158,10 @@ def load_historical_matches(leagues: list[str], seasons_back: int, settings: dic
         report["output_rows"], report["input_rows"], report["dropped_missing_core"],
         report["dropped_same_team"], report["dropped_duplicate"], report["odds_invalidated"], report["odds_coverage"],
     )
+    if window_days is not None:
+        before = len(matches)
+        matches = trim_to_rolling_window(matches, window_days)
+        logger.info("Trimmed to rolling %d-day window: %d/%d rows kept", window_days, len(matches), before)
     return matches
 
 
@@ -182,7 +216,7 @@ def fit_model(
 
 def record_predictions_to_supabase(
     predictions: pd.DataFrame, models: dict[str, DixonColesModel], settings: dict,
-    price_source: str, run_id: str | None = None, client=None,
+    price_source: str, run_id: str | None = None, client=None, window_days: int | None = None,
 ) -> dict:
     """Write every prediction row to Supabase — the only ledger (Phase 0
     revised; the local file ledger has been retired, see
@@ -207,7 +241,9 @@ def record_predictions_to_supabase(
         return {"run_id": run_id, "status": "Not configured", "failed": len(predictions)}
 
     rows = [
-        prediction_row_from_pipeline(row, run_id, models.get(row["league"]), settings, price_source)
+        prediction_row_from_pipeline(
+            row, run_id, models.get(row["league"]), settings, price_source, window_days=window_days,
+        )
         for _, row in predictions.iterrows()
     ]
     failed = write_predictions(rows, client=client)

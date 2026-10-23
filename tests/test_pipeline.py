@@ -7,7 +7,7 @@ sys.path.insert(0, "tests")
 from test_dixon_coles import generate_synthetic_matches  # noqa: E402
 
 from src.models.dixon_coles import DixonColesModel  # noqa: E402
-from src.pipeline import build_predictions, fit_model  # noqa: E402
+from src.pipeline import build_predictions, fit_model, trim_to_rolling_window  # noqa: E402
 
 SETTINGS = {
     "devig": {"method": "multiplicative"},
@@ -185,3 +185,49 @@ class TestBuildPredictionsMissingModel:
 
         assert "SP1" not in predictions["league"].values
         assert set(predictions["league"]) == {"E0"}
+
+
+class TestTrimToRollingWindow:
+    def _matches(self, as_of: pd.Timestamp) -> pd.DataFrame:
+        # One row per day for 1000 days leading up to (but not
+        # including) as_of, plus one row exactly on as_of itself.
+        dates = pd.date_range(end=as_of, periods=1001, freq="D", tz="UTC")
+        return pd.DataFrame({"date": dates, "league": "E0", "home_team": "A", "away_team": "B"})
+
+    def test_keeps_only_rows_within_the_window(self):
+        as_of = pd.Timestamp("2026-10-23", tz="UTC")
+        matches = self._matches(as_of)
+        trimmed = trim_to_rolling_window(matches, window_days=730, as_of=as_of)
+
+        assert (trimmed["date"] >= as_of - pd.Timedelta(days=730)).all()
+        assert (trimmed["date"] < as_of).all()
+
+    def test_row_exactly_on_as_of_is_excluded(self):
+        # Mirrors gate_harness.run_league_evaluation's own boundary
+        # (date < current_date), which treats "now" as not-yet-history.
+        as_of = pd.Timestamp("2026-10-23", tz="UTC")
+        matches = self._matches(as_of)
+        trimmed = trim_to_rolling_window(matches, window_days=730, as_of=as_of)
+        assert not (trimmed["date"] == as_of).any()
+
+    def test_row_exactly_at_window_start_is_included(self):
+        as_of = pd.Timestamp("2026-10-23", tz="UTC")
+        matches = self._matches(as_of)
+        trimmed = trim_to_rolling_window(matches, window_days=730, as_of=as_of)
+        window_start = as_of - pd.Timedelta(days=730)
+        assert (trimmed["date"] == window_start).any()
+
+    def test_matches_a_known_count(self):
+        # 730-day window, left-inclusive/right-exclusive -> exactly 730
+        # distinct days' worth of the one-row-per-day fixture.
+        as_of = pd.Timestamp("2026-10-23", tz="UTC")
+        matches = self._matches(as_of)
+        trimmed = trim_to_rolling_window(matches, window_days=730, as_of=as_of)
+        assert len(trimmed) == 730
+
+    def test_defaults_as_of_to_now(self):
+        now = pd.Timestamp.now(tz="UTC")
+        matches = self._matches(now)
+        trimmed = trim_to_rolling_window(matches, window_days=730)
+        assert not trimmed.empty
+        assert (trimmed["date"] <= now).all()

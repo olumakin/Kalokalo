@@ -371,3 +371,26 @@ class TestPredictionRowFromPipeline:
 
         assert out["stake_shadow"] == pytest.approx(0.012)
         assert out["bankroll_at_slate"] == pytest.approx(2.5)
+
+    def test_window_days_populated_when_given(self):
+        model = MagicMock(rho_=-0.05, converged_=True, fallback_used_=False)
+        settings = {"model": {"xi_decay": 0.0065}, "edge": {}}
+
+        out = prediction_row_from_pipeline(
+            self._full_row(), run_id="run-1", model=model, settings=settings,
+            price_source="live_odds", window_days=730,
+        )
+
+        assert out["window_days"] == 730
+
+    def test_window_days_defaults_to_null(self):
+        # No window trim applied -- must be NULL, not silently 0 or
+        # some other value a reader could mistake for "validated".
+        model = MagicMock(rho_=-0.05, converged_=True, fallback_used_=False)
+        settings = {"model": {"xi_decay": 0.0065}, "edge": {}}
+
+        out = prediction_row_from_pipeline(
+            self._full_row(), run_id="run-1", model=model, settings=settings, price_source="live_odds",
+        )
+
+        assert out["window_days"] is None

@@ -12,6 +12,7 @@ pipeline) render only inside the `if admin:` sidebar block below.
 """
 from __future__ import annotations
 
+import math
 import os
 
 import pandas as pd
@@ -220,8 +221,10 @@ def _cached_gate_status() -> dict:
 
 
 @st.cache_data(show_spinner=False, ttl="6h")
-def _cached_historical_download(leagues: tuple[str, ...], seasons_back: int, _settings: dict) -> pd.DataFrame:
-    return load_historical_matches(list(leagues), seasons_back, _settings)
+def _cached_historical_download(
+    leagues: tuple[str, ...], seasons_back: int, _settings: dict, window_days: int,
+) -> pd.DataFrame:
+    return load_historical_matches(list(leagues), seasons_back, _settings, window_days=window_days)
 
 
 @st.cache_data(show_spinner=False, ttl="15m")
@@ -284,7 +287,26 @@ with st.sidebar:
             "Active Leagues", league_options, default=league_options,
             format_func=lambda c: f"{c} — {settings['leagues'][c]}", key="hist_leagues_multiselect",
         )
-        dl_seasons_back = st.slider("Seasons of history", 1, 4, 2, key="hist_seasons_slider")
+        validated_window_days = settings["model"]["rolling_window_days"]
+        dl_window_days = st.slider(
+            "Historical window (days)", min_value=365, max_value=1460,
+            value=validated_window_days, step=5, key="hist_window_slider",
+            help="Defaults to the WP3-validated window. Moving this off the validated value is an "
+                 "admin experiment -- public cards will show forecast-only (no validated badge or "
+                 "fair price) for this run, regardless of gate_status, until a run at the validated "
+                 "window is recorded again.",
+        )
+        if dl_window_days != validated_window_days:
+            st.warning(
+                f"⚠️ {dl_window_days}d is not the validated window ({validated_window_days}d). "
+                f"This run will show as forecast-only publicly, even for a gate-cleared league."
+            )
+        # Enough whole seasons to cover the window, plus one extra for a
+        # reference date that falls early in the current season --
+        # season-CSV loading is the only way to get the raw rows at all;
+        # the exact window is enforced by the trim below (src.pipeline
+        # .trim_to_rolling_window), not by how many seasons this fetches.
+        dl_seasons_back = math.ceil(dl_window_days / 365) + 1
 
         st.header("2. Live Market Feed")
         st.caption("Upcoming fixtures are fetched automatically — no source to pick.")
@@ -320,7 +342,7 @@ if admin and run_clicked:
         if not dl_leagues:
             st.error("Select at least one league.")
             st.stop()
-        matches = _cached_historical_download(tuple(dl_leagues), dl_seasons_back, settings)
+        matches = _cached_historical_download(tuple(dl_leagues), dl_seasons_back, settings, dl_window_days)
 
     if matches.empty:
         st.error("No historical matches loaded — cannot fit the model.")
@@ -357,7 +379,9 @@ if admin and run_clicked:
         st.stop()
 
     predictions_out = build_predictions(fixtures, models, settings)
-    result = record_predictions_to_supabase(predictions_out, models, settings, price_source=fixture_source_used)
+    result = record_predictions_to_supabase(
+        predictions_out, models, settings, price_source=fixture_source_used, window_days=dl_window_days,
+    )
 
     # Session-only handoff to the admin-only Model Diagnostics / Backtest
     # pages — never used by the public read path below. Stashed before the
@@ -477,6 +501,29 @@ else:
         gate_status = _cached_gate_status()
         now_utc = pd.Timestamp.now(tz="UTC")
 
+        # Second, independent gate: gate_status alone isn't enough -- it
+        # only says a league's model/market historically cleared the
+        # bar, not that *this run*'s window matches what was validated
+        # (a league's gate can be 'proceed' while an admin experiment
+        # at a different --rolling-window-days is what's actually on
+        # screen). window_days is logged per prediction row
+        # (src.tracking.supabase_ledger.prediction_row_from_pipeline);
+        # missing (older rows / unmigrated schema) is treated the same
+        # as "not validated", never silently assumed to be 730.
+        window_days_used = None
+        if "window_days" in predictions.columns:
+            non_null = predictions["window_days"].dropna()
+            if not non_null.empty:
+                window_days_used = non_null.iloc[0]
+        window_is_validated = window_days_used == settings["model"]["rolling_window_days"]
+        if not window_is_validated:
+            shown = f"{window_days_used}d" if window_days_used is not None else "unknown"
+            st.info(
+                f"This run's historical window ({shown}) isn't the WP3-validated "
+                f"{settings['model']['rolling_window_days']}d window, so every fixture below "
+                f"shows as forecast-only, even in a league whose gate has otherwise cleared."
+            )
+
         rows = list(display_df.iterrows())
         for i in range(0, len(rows), 2):
             pair = rows[i:i + 2]
@@ -484,7 +531,11 @@ else:
             for col, (_, match) in zip(cols, pair):
                 with col, st.container(border=True):
                     league_gate = gate_status.get(match["league"], {})
-                    league_proceeds = league_gate.get("status") == "proceed" and bool(league_gate.get("approved_at"))
+                    league_proceeds = (
+                        window_is_validated
+                        and league_gate.get("status") == "proceed"
+                        and bool(league_gate.get("approved_at"))
+                    )
 
                     is_high_tie = match["p_draw"] >= HIGH_TIE_P_DRAW
                     tie_badge_class = "badge-draw-high" if is_high_tie else "badge-draw-med"

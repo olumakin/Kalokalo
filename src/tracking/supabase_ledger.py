@@ -90,7 +90,7 @@ def get_supabase_client(url: str | None = None, key: str | None = None):
 
 
 def prediction_row_from_pipeline(
-    row: pd.Series, run_id: str, model, settings: dict, price_source: str,
+    row: pd.Series, run_id: str, model, settings: dict, price_source: str, window_days: int | None = None,
 ) -> dict[str, Any]:
     """Map one src.pipeline.build_predictions() output row (plus the
     fitted model it came from) onto the Supabase `predictions` schema.
@@ -103,6 +103,15 @@ def prediction_row_from_pipeline(
     matchweek is likewise NULL — that's a WP3 evaluation-harness concept
     (src.validation.gate_harness), not something the live pipeline
     computes today.
+
+    `window_days` is the actual rolling-window length (src.pipeline
+    .trim_to_rolling_window) the historical data was trimmed to before
+    this row's model was fit -- logged so a viewer can tell, after the
+    fact, whether a given prediction came from the WP3-validated
+    730-day window or an admin experiment at a different one. None
+    (not fetched with a window trim at all, e.g. an older code path)
+    is stored as NULL, which app.py's gate treats as "not validated",
+    same as any other non-730 value.
     """
     edge_cfg = (settings or {}).get("edge", {})
     return {
@@ -143,6 +152,7 @@ def prediction_row_from_pipeline(
         "actual_home_goals": None, "actual_away_goals": None, "actual_outcome_idx": None,
         "stake_shadow": float(row["stake_pct"]) if pd.notna(row.get("stake_pct")) else None,
         "bankroll_at_slate": float(edge_cfg.get("shadow_bankroll_units", 1.0)),
+        "window_days": int(window_days) if window_days is not None else None,
     }
 
 
@@ -255,7 +265,7 @@ def fetch_predictions(client=None, limit: int = 500) -> pd.DataFrame:
 _LATEST_PREDICTIONS_COLUMNS = (
     "fixture_id,run_id,match_date,league,home_id,away_id,"
     "p_home,p_draw,p_away,market_p_draw,lambda_val,mu_val,rho_val,"
-    "entry_source,stake_shadow,ev_entry,created_at"
+    "entry_source,stake_shadow,ev_entry,created_at,window_days"
 )
 
 

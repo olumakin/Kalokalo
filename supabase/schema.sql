@@ -76,6 +76,14 @@ CREATE TABLE predictions (
     -- visitors never see either column.
     stake_shadow NUMERIC,
     bankroll_at_slate NUMERIC,
+    -- The rolling-window length (in days) the historical data was
+    -- trimmed to before this row's model was fit (src.pipeline
+    -- .trim_to_rolling_window). NULL means no window trim was applied
+    -- (an older code path, or load_historical_matches called without
+    -- window_days) -- app.py treats that the same as any non-730 value:
+    -- not the WP3-validated window, so public cards show forecast-only
+    -- regardless of gate_status.
+    window_days INTEGER,
     UNIQUE (fixture_id, model_version, run_id)
 );
 
