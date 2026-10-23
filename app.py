@@ -562,12 +562,15 @@ else:
                     # DRAW_BLEND_WEIGHT_BY_LEAGUE above), not the raw model
                     # probability -- step 7's draw-only blend test found
                     # the raw model alone isn't what actually minimizes
-                    # log-loss. No configured weight or no market price on
-                    # this row -> skip the box rather than silently fall
-                    # back to an unblended number under the same label.
+                    # log-loss. No market price on this row -> say so
+                    # explicitly rather than silently falling back to an
+                    # unblended number under the same label, or saying
+                    # nothing at all.
                     blend_w = DRAW_BLEND_WEIGHT_BY_LEAGUE.get(match["league"])
                     market_p_draw = match.get("market_p_draw")
-                    if league_proceeds and blend_w is not None and pd.notna(market_p_draw):
+                    if league_proceeds and blend_w is not None and pd.isna(market_p_draw):
+                        st.caption("Fair price unavailable (no market price on this fixture).")
+                    elif league_proceeds and blend_w is not None and pd.notna(market_p_draw):
                         p_draw_priced = blend_w * match["p_draw"] + (1 - blend_w) * market_p_draw
                         fair_price = 1.0 / p_draw_priced
                         st.markdown(
