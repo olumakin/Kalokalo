@@ -10,6 +10,7 @@ data/historical/*.csv
 data/ledger.parquet
 data/ledger.csv
 data/cache/
+data/gate_reports/
 
 .DS_Store
 
