@@ -40,6 +40,17 @@ MAX_CARDS = 10
 # (~24-26%).
 HIGH_TIE_P_DRAW = 0.275
 
+# Step 7's draw-only blend test (ad hoc run against
+# data/gate_reports/20261023_132033/results.csv, src.validation.blend's
+# draw-only variant) found a 0.10 model / 0.90 de-vigged-market blend
+# minimizes log-loss for I1 specifically -- the one league where any
+# blend beat both sources alone; every other league's best weight was
+# 0.00 (pure market). Not a general rule, so this is keyed by league
+# rather than applied to every gate-cleared league automatically -- a
+# future league clearing the gate needs its own blend weight checked,
+# not an assumed 0.10.
+DRAW_BLEND_WEIGHT_BY_LEAGUE = {"I1": 0.10}
+
 _FEED_LABELS = {
     FIXTURE_SOURCE_LIVE_ODDS: "Live Odds API (Consensus)",
     FIXTURE_SOURCE_FREE_SCHEDULE: "football-data.co.uk (Free)",
@@ -545,16 +556,28 @@ else:
                     # actually uses), and scoped to leagues the gate has
                     # actually cleared -- a forecast-only league gets no
                     # edge-shaped number here, just the forecast above.
-                    if league_proceeds and match["p_draw"] > 0:
-                        fair_price = 1.0 / match["p_draw"]
+                    #
+                    # Priced off the league's validated blend (model draw
+                    # probability blended with the de-vigged market, per
+                    # DRAW_BLEND_WEIGHT_BY_LEAGUE above), not the raw model
+                    # probability -- step 7's draw-only blend test found
+                    # the raw model alone isn't what actually minimizes
+                    # log-loss. No configured weight or no market price on
+                    # this row -> skip the box rather than silently fall
+                    # back to an unblended number under the same label.
+                    blend_w = DRAW_BLEND_WEIGHT_BY_LEAGUE.get(match["league"])
+                    market_p_draw = match.get("market_p_draw")
+                    if league_proceeds and blend_w is not None and pd.notna(market_p_draw):
+                        p_draw_priced = blend_w * match["p_draw"] + (1 - blend_w) * market_p_draw
+                        fair_price = 1.0 / p_draw_priced
                         st.markdown(
                             f"""
                                 <div class="fair-price-box">
-                                    <div class="fair-price-label">Model Fair Price (Draw)</div>
+                                    <div class="fair-price-label">Fair Price (Draw)</div>
                                     <div class="fair-price-value">{fair_price:.2f}</div>
                                     <div style="font-size:0.78rem; color:#94a3b8; margin-top:2px;">
-                                        Breakeven decimal odds for a draw bet, per this league's
-                                        WP3-validated model. Not tied to any one bookmaker.
+                                        Breakeven decimal odds for a draw bet, from this league's
+                                        validated model/market blend. Not tied to any one bookmaker.
                                     </div>
                                 </div>
                             """,
@@ -568,7 +591,7 @@ else:
                                  "them -- this doesn't assume a specific bookmaker's feed.",
                         )
                         if your_price:
-                            your_ev = calculate_ev(match["p_draw"], your_price)
+                            your_ev = calculate_ev(p_draw_priced, your_price)
                             st.caption(f"Your edge at that price: **{your_ev:+.1%}** EV — informational only, not a bet recommendation.")
 
                     if admin and league_proceeds:

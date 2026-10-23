@@ -248,10 +248,13 @@ def fetch_predictions(client=None, limit: int = 500) -> pd.DataFrame:
 # stake_shadow/ev_entry are gated by is_admin() in the UI, not excluded
 # here). Narrower than "*", which pulled all ~40 columns including
 # several (git_commit, converged, xi_val, close_*, ...) this page never
-# touches.
+# touches. market_p_draw is the de-vigged market consensus the pipeline
+# already computes (src.pipeline.build_predictions) -- needed publicly
+# now too, for the gate-cleared-league fair-price blend (step 7's
+# draw-only blend test; see app.py's DRAW_BLEND_WEIGHT_BY_LEAGUE).
 _LATEST_PREDICTIONS_COLUMNS = (
     "fixture_id,run_id,match_date,league,home_id,away_id,"
-    "p_home,p_draw,p_away,lambda_val,mu_val,rho_val,"
+    "p_home,p_draw,p_away,market_p_draw,lambda_val,mu_val,rho_val,"
     "entry_source,stake_shadow,ev_entry,created_at"
 )
 
