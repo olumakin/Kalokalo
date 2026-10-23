@@ -18,15 +18,23 @@ GATE_INCONCLUSIVE = "inconclusive"
 
 def compute_gate_decision(clv_by_league: dict[str, dict]) -> dict:
     """clv_by_league: {league: evaluate_league_clv(...) result}, i.e.
-    each value has "baseline" and "flagged" sub-dicts with n/mean_clv/
-    ci_lo/ci_hi/insufficient_sample.
+    each value has "baseline", "flagged", and "diff" sub-dicts with
+    n/mean_clv (or mean_diff for "diff")/ci_lo/ci_hi/insufficient_sample.
 
     Decision rule, applied to leagues with a sufficient flagged-bet
-    sample only (insufficient_sample leagues can't support any
-    decision and are excluded rather than silently counted as failing):
-      - lower CLV bound above 0 in some league(s) -> proceed with those
-        leagues only (their flagged bets show a real edge over the
-        market's own closing move, not just the baseline).
+    sample for *both* the flagged-CLV and diff-vs-baseline statistics
+    (insufficient_sample leagues can't support any decision and are
+    excluded rather than silently counted as failing):
+      - lower bound above 0 on *both* flagged CLV and the flagged-vs-
+        baseline diff, in some league(s) -> proceed with those leagues
+        only. Flagged CLV alone isn't enough: a league can clear zero
+        on flagged CLV purely because the draw price drifts favorably
+        across the board (baseline positive too), with the model's
+        selection adding nothing over naively betting every draw --
+        the diff criterion is what rules that out. Added as a
+        permanent gate criterion after a WP3 review found exactly this
+        pattern in three of four leagues the gate had cleared on
+        flagged CLV alone.
       - otherwise, if the upper CLV bound is at or below 0 in every
         evaluable league -> reposition as a forecasting tool (no league
         shows even a plausible edge).
@@ -34,8 +42,8 @@ def compute_gate_decision(clv_by_league: dict[str, dict]) -> dict:
         clearing it — more data needed, not a verdict either way).
     """
     evaluable = {
-        lg: d["flagged"] for lg, d in clv_by_league.items()
-        if not d["flagged"]["insufficient_sample"]
+        lg: d for lg, d in clv_by_league.items()
+        if not d["flagged"]["insufficient_sample"] and not d["diff"]["insufficient_sample"]
     }
     if not evaluable:
         return {
@@ -44,15 +52,20 @@ def compute_gate_decision(clv_by_league: dict[str, dict]) -> dict:
             "leagues": [],
         }
 
-    proceed_leagues = sorted(lg for lg, f in evaluable.items() if f["ci_lo"] > 0)
+    proceed_leagues = sorted(
+        lg for lg, d in evaluable.items() if d["flagged"]["ci_lo"] > 0 and d["diff"]["ci_lo"] > 0
+    )
     if proceed_leagues:
         return {
             "decision": GATE_PROCEED_SUBSET,
-            "reason": f"lower CLV bound above 0 in: {', '.join(proceed_leagues)}",
+            "reason": (
+                f"lower bound above 0 on both flagged CLV and the vs.-baseline diff in: "
+                f"{', '.join(proceed_leagues)}"
+            ),
             "leagues": proceed_leagues,
         }
 
-    if all(f["ci_hi"] <= 0 for f in evaluable.values()):
+    if all(d["flagged"]["ci_hi"] <= 0 for d in evaluable.values()):
         return {
             "decision": GATE_REPOSITION,
             "reason": "upper CLV bound at or below 0 in every evaluable league",
@@ -61,7 +74,7 @@ def compute_gate_decision(clv_by_league: dict[str, dict]) -> dict:
 
     return {
         "decision": GATE_INCONCLUSIVE,
-        "reason": "CLV interval straddles 0 in every evaluable league, none clears it",
+        "reason": "CLV interval straddles 0, or doesn't beat the naive baseline, in every evaluable league",
         "leagues": [],
     }
 
@@ -96,15 +109,23 @@ def render_gate_report_markdown(
 
     lines.append("## CLV by league")
     lines.append("")
-    lines.append("| League | Baseline n | Baseline CLV | Flagged n | Flagged CLV | Flagged 95% CI |")
-    lines.append("|---|---|---|---|---|---|")
+    lines.append(
+        "| League | Baseline n | Baseline CLV | Flagged n | Flagged CLV | Flagged 95% CI | "
+        "Diff vs. baseline | Diff 95% CI |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|")
     for league in sorted(clv_by_league):
-        b, f = clv_by_league[league]["baseline"], clv_by_league[league]["flagged"]
+        b, f, d = clv_by_league[league]["baseline"], clv_by_league[league]["flagged"], clv_by_league[league]["diff"]
         flagged_ci = (
             "n/a" if f["insufficient_sample"] else f"[{_fmt_pct(f['ci_lo'])}, {_fmt_pct(f['ci_hi'])}]"
         )
+        diff_ci = (
+            "n/a" if d["insufficient_sample"] else f"[{_fmt_pct(d['ci_lo'])}, {_fmt_pct(d['ci_hi'])}]"
+        )
+        diff_val = "n/a (insufficient sample)" if d["insufficient_sample"] else _fmt_pct(d["mean_diff"])
         lines.append(
-            f"| {league} | {b['n']} | {_fmt_pct(b['mean_clv'])} | {f['n']} | {_fmt_pct(f['mean_clv'])} | {flagged_ci} |"
+            f"| {league} | {b['n']} | {_fmt_pct(b['mean_clv'])} | {f['n']} | {_fmt_pct(f['mean_clv'])} | "
+            f"{flagged_ci} | {diff_val} | {diff_ci} |"
         )
     lines.append("")
 

@@ -87,3 +87,53 @@ class TestEvaluateLeagueClv:
         df = self._df().drop(columns=["matchweek"])
         result = evaluate_league_clv(df, "entry_odds", "close_odds", df["qualified"], block_col="matchweek")
         assert result["baseline"]["insufficient_sample"] is False
+
+    def test_diff_is_present_and_matches_flagged_minus_baseline_mean(self):
+        df = self._df()
+        result = evaluate_league_clv(df, "entry_odds", "close_odds", df["qualified"])
+        assert "diff" in result
+        expected = result["flagged"]["mean_clv"] - result["baseline"]["mean_clv"]
+        assert result["diff"]["mean_diff"] == pytest.approx(expected)
+        assert result["diff"]["ci_lo"] <= result["diff"]["mean_diff"] <= result["diff"]["ci_hi"]
+
+    def test_diff_insufficient_when_flagged_sample_too_small(self):
+        df = self._df()
+        # Keep only 2 qualifying rows -- below INSUFFICIENT_SAMPLE_THRESHOLD.
+        sparse_qualified = pd.Series(False, index=df.index)
+        sparse_qualified.iloc[:2] = True
+        result = evaluate_league_clv(df, "entry_odds", "close_odds", sparse_qualified)
+        assert result["diff"]["insufficient_sample"] is True
+        assert pd.isna(result["diff"]["mean_diff"])
+
+    def test_flagged_with_genuine_edge_over_baseline_has_positive_diff_ci(self):
+        df = self._df()
+        # Same deliberately-better flagged price as the mean-comparison
+        # test above, but here checking the *interval*, not just the
+        # point estimate -- this is what the gate's new diff criterion
+        # (src.validation.gate_report.compute_gate_decision) actually
+        # reads.
+        df["entry_for_flagged"] = np.where(df["qualified"], df["flagged_entry"], df["entry_odds"])
+        result = evaluate_league_clv(df, "entry_for_flagged", "close_odds", df["qualified"])
+        assert result["diff"]["insufficient_sample"] is False
+        assert result["diff"]["ci_lo"] > 0
+
+    def test_flagged_with_no_real_edge_over_baseline_straddles_zero(self):
+        # Flagged rows use the *same* pricing distribution as everyone
+        # else -- the model's selection shouldn't look better than the
+        # naive baseline, so the diff CI should straddle 0, not clear
+        # it. Uses a larger, independently-random (not lock-step every-
+        # Nth) flagged mask than self._df()'s -- at n=60 with a fixed
+        # seed, a deterministic 1-in-3 selection can land a spuriously
+        # one-sided sample purely by chance, which isn't what this test
+        # is checking for.
+        rng = np.random.default_rng(42)
+        n = 300
+        close = rng.uniform(2.0, 4.0, n)
+        entry = close * (1 + rng.normal(0.0, 0.02, n))
+        qualified = rng.random(n) < 0.3
+        df = pd.DataFrame({
+            "entry_odds": entry, "close_odds": close,
+            "matchweek": [f"mw{i // 10}" for i in range(n)], "qualified": qualified,
+        })
+        result = evaluate_league_clv(df, "entry_odds", "close_odds", df["qualified"])
+        assert result["diff"]["ci_lo"] <= 0 <= result["diff"]["ci_hi"]

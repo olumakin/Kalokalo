@@ -1,7 +1,7 @@
 """
 Closing Line Value evaluation for the WP3 gate harness.
 
-Two distinct questions, both needed for the gate decision:
+Three questions, all needed for the gate decision:
   1. Baseline CLV — across *every* fixture with both an entry and a
      closing price, regardless of whether the model flagged it. This is
      the market's own natural CLV distribution (should center near 0
@@ -9,6 +9,14 @@ Two distinct questions, both needed for the gate decision:
   2. Flagged-bet CLV — the same statistic, restricted to fixtures the
      model actually qualified. The model only demonstrates value if
      flagged CLV clears the baseline, not merely zero.
+  3. Flagged-vs-baseline diff — whether the model's selection actually
+     beats the naive "take the draw at entry odds on every fixture"
+     strategy, not just zero. A league can show positive flagged CLV
+     purely because the draw price drifts favorably across the board
+     (positive baseline too) without the model's filtering adding
+     anything; added as a permanent gate criterion after a WP3 review
+     found exactly this in three of four leagues the gate had cleared
+     on flagged CLV alone (see gate_report.compute_gate_decision).
 """
 from __future__ import annotations
 
@@ -96,4 +104,55 @@ def evaluate_league_clv(
     )
     flagged = evaluate_clv_series(flagged_clv.to_numpy(), flagged_block_ids, min_sample, n_resamples, seed)
 
-    return {"baseline": baseline, "flagged": flagged}
+    diff = _evaluate_clv_diff(
+        priced, clv, flagged_mask, block_col, min_sample, n_resamples, seed, n_flagged=flagged["n"],
+    )
+
+    return {"baseline": baseline, "flagged": flagged, "diff": diff}
+
+
+def _evaluate_clv_diff(
+    priced: pd.DataFrame,
+    clv: pd.Series,
+    flagged_mask: pd.Series,
+    block_col: str | None,
+    min_sample: int,
+    n_resamples: int,
+    seed: int,
+    n_flagged: int,
+) -> dict:
+    """Bootstrap CI for (flagged mean CLV - baseline mean CLV): does the
+    model's selection beat naively taking the draw price on every
+    priced fixture, not just beat zero.
+
+    Resamples the *shared* priced population (flagged is a subset of
+    baseline, not an independent sample) so each resample's flagged and
+    baseline means are computed from the same drawn rows -- this
+    respects the overlap between the two populations rather than
+    treating them as independent, which would overstate the interval
+    width.
+    """
+    if n_flagged <= min_sample:
+        return {"mean_diff": float("nan"), "ci_lo": float("nan"), "ci_hi": float("nan"), "insufficient_sample": True}
+
+    resample_df = pd.DataFrame({
+        "clv": clv.to_numpy(),
+        "flagged": flagged_mask.reindex(priced.index, fill_value=False).to_numpy(),
+    })
+    mean_diff = float(
+        resample_df.loc[resample_df["flagged"], "clv"].mean() - resample_df["clv"].mean()
+    )
+
+    def diff_stat(resampled: pd.DataFrame) -> float:
+        baseline_mean = resampled["clv"].mean()
+        flagged_rows = resampled.loc[resampled["flagged"]]
+        flagged_mean = flagged_rows["clv"].mean() if len(flagged_rows) else np.nan
+        return flagged_mean - baseline_mean
+
+    block_ids = priced[block_col].to_numpy() if block_col and block_col in priced.columns else None
+    if block_ids is not None:
+        ci_lo, ci_hi = block_bootstrap_ci(resample_df, block_ids, diff_stat, n_resamples=n_resamples, seed=seed)
+    else:
+        ci_lo, ci_hi = bootstrap_ci(resample_df, diff_stat, n_resamples=n_resamples, seed=seed)
+
+    return {"mean_diff": mean_diff, "ci_lo": ci_lo, "ci_hi": ci_hi, "insufficient_sample": False}
