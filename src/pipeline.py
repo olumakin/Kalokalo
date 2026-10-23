@@ -31,12 +31,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 
-def build_predictions(fixtures: pd.DataFrame, model: DixonColesModel, settings: dict) -> pd.DataFrame:
+def build_predictions(fixtures: pd.DataFrame, models: dict[str, DixonColesModel], settings: dict) -> pd.DataFrame:
+    """`models` is one fitted DixonColesModel per league (see `fit_model`),
+    not a single shared fit -- each fixture is scored by its own league's
+    model. A fixture whose league has no entry (historical data couldn't
+    be fetched or fit for it) is skipped with a warning, the same
+    fail-soft behavior already used elsewhere in this pipeline for a
+    missing league, rather than raising and losing every other league's
+    predictions over one gap.
+    """
     edge_cfg = settings["edge"]
     devig_method = settings["devig"]["method"]
 
     rows = []
     for _, row in fixtures.iterrows():
+        model = models.get(row["league"])
+        if model is None:
+            logger.warning(
+                "No fitted model for league %r; skipping %s v %s",
+                row["league"], row["home_team"], row["away_team"],
+            )
+            continue
         lam, mu, rho = model.predict(row["home_team"], row["away_team"])
         probs = match_probabilities(lam, mu, rho)
         model_p_draw = probs["p_draw"]
@@ -118,29 +133,55 @@ def load_historical_matches(leagues: list[str], seasons_back: int, settings: dic
 
 def fit_model(
     matches: pd.DataFrame, settings: dict, goal_columns: tuple[str, str] = ("home_goals", "away_goals"),
-) -> DixonColesModel:
-    """Fit the Dixon-Coles model on a canonical-schema match history.
+) -> dict[str, DixonColesModel]:
+    """Fit one Dixon-Coles model per league, not one joint fit across all
+    of them -- returns {league: fitted_model}.
 
-    `goal_columns` defaults to actual goals; pass ("home_xg", "away_xg")
-    to fit on blended xG instead (src/ingestion/sources.py) — see
-    DixonColesModel.fit's docstring for the caveats of doing so.
+    A single joint fit across the Big 5 pins one shared mu0 (baseline
+    scoring rate) and one shared gamma (home advantage) across leagues
+    that genuinely differ on both (Bundesliga runs meaningfully
+    higher-scoring than Ligue 1, for instance), and turns the
+    optimization into one much larger problem instead of several small
+    ones -- both a source of bias and, empirically, a real convergence
+    risk (confirmed live: a joint fit over the full Big 5 failed to
+    converge and silently fell back to independent Poisson, per
+    DixonColesModel.fit's failsafe). This is also the shape WP3's
+    gate-evaluation harness validates
+    (src.validation.gate_harness.run_league_evaluation fits per league);
+    the live pipeline fitting jointly instead meant the CLV evidence WP3
+    produced never actually applied to what this function returned.
     """
     model_cfg = settings["model"]
-    model = DixonColesModel(
-        min_matches=model_cfg["min_matches_for_team_rating"],
-        max_iter=model_cfg["max_optimizer_iterations"],
-        method=model_cfg["optimizer_method"],
-        rho_init=model_cfg["rho_init"],
-    ).fit(matches, xi=model_cfg["xi_decay"], goal_columns=goal_columns)
-    logger.info(
-        "Model fit: mu0=%.4f gamma=%.4f rho=%.4f converged=%s fallback_used=%s teams=%d",
-        model.mu0_, model.gamma_, model.rho_, model.converged_, model.fallback_used_, len(model.teams_),
-    )
-    return model
+    models: dict[str, DixonColesModel] = {}
+    for league in sorted(matches["league"].unique()):
+        league_matches = matches[matches["league"] == league]
+        try:
+            model = DixonColesModel(
+                min_matches=model_cfg["min_matches_for_team_rating"],
+                max_iter=model_cfg["max_optimizer_iterations"],
+                method=model_cfg["optimizer_method"],
+                rho_init=model_cfg["rho_init"],
+            ).fit(league_matches, xi=model_cfg["xi_decay"], goal_columns=goal_columns)
+        except ValueError as exc:
+            # One league's fit failing (e.g. too little data) shouldn't
+            # cost every other league its predictions -- skip it and
+            # warn, the same fail-soft handling already used for a
+            # league with no historical data at all.
+            logger.warning("Model fit failed for league %r, skipping: %s", league, exc)
+            continue
+        logger.info(
+            "Model fit [%s]: mu0=%.4f gamma=%.4f rho=%.4f converged=%s fallback_used=%s teams=%d",
+            league, model.mu0_, model.gamma_, model.rho_, model.converged_, model.fallback_used_, len(model.teams_),
+        )
+        models[league] = model
+
+    if not models:
+        raise ValueError("No league could be fit -- see warnings above for each league's failure reason")
+    return models
 
 
 def record_predictions_to_supabase(
-    predictions: pd.DataFrame, model: DixonColesModel, settings: dict,
+    predictions: pd.DataFrame, models: dict[str, DixonColesModel], settings: dict,
     price_source: str, run_id: str | None = None, client=None,
 ) -> dict:
     """Write every prediction row to Supabase — the only ledger (Phase 0
@@ -166,7 +207,7 @@ def record_predictions_to_supabase(
         return {"run_id": run_id, "status": "Not configured", "failed": len(predictions)}
 
     rows = [
-        prediction_row_from_pipeline(row, run_id, model, settings, price_source)
+        prediction_row_from_pipeline(row, run_id, models.get(row["league"]), settings, price_source)
         for _, row in predictions.iterrows()
     ]
     failed = write_predictions(rows, client=client)
@@ -183,15 +224,15 @@ def run(fixtures_path: str, leagues: list[str], seasons_back: int, settings_path
         logger.error("No historical matches available; cannot fit model. Populate data/historical/ or check network access.")
         return pd.DataFrame()
 
-    model = fit_model(matches, settings)
+    models = fit_model(matches, settings)
 
     fixtures = load_fixture_csv(fixtures_path)
     if fixtures.empty:
         logger.warning("No fixtures loaded from %s", fixtures_path)
         return pd.DataFrame()
 
-    predictions = build_predictions(fixtures, model, settings)
-    result = record_predictions_to_supabase(predictions, model, settings, price_source="cli_fixture_csv")
+    predictions = build_predictions(fixtures, models, settings)
+    result = record_predictions_to_supabase(predictions, models, settings, price_source="cli_fixture_csv")
     logger.info("Supabase ledger: %s (run_id=%s, failed=%d)", result["status"], result["run_id"], result["failed"])
     return predictions
 

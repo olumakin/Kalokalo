@@ -7,11 +7,18 @@ sys.path.insert(0, "tests")
 from test_dixon_coles import generate_synthetic_matches  # noqa: E402
 
 from src.models.dixon_coles import DixonColesModel  # noqa: E402
-from src.pipeline import build_predictions  # noqa: E402
+from src.pipeline import build_predictions, fit_model  # noqa: E402
 
 SETTINGS = {
     "devig": {"method": "multiplicative"},
     "edge": {"min_ev": 0.03, "kelly_fraction": 0.15, "single_match_cap": 0.025, "daily_slate_cap": 0.08},
+}
+
+FIT_SETTINGS = {
+    "model": {
+        "min_matches_for_team_rating": 15, "max_optimizer_iterations": 500,
+        "optimizer_method": "L-BFGS-B", "rho_init": -0.05, "xi_decay": 0.0065,
+    },
 }
 
 
@@ -19,6 +26,14 @@ SETTINGS = {
 def fitted_model():
     matches = generate_synthetic_matches()
     return DixonColesModel(min_matches=15).fit(matches, xi=0.0065)
+
+
+@pytest.fixture
+def models(fitted_model):
+    # build_predictions takes {league: model} since src.pipeline.fit_model
+    # fits per league, not one shared model -- the `fixtures` fixture
+    # below is all-E0, so one entry covers it.
+    return {"E0": fitted_model}
 
 
 @pytest.fixture
@@ -36,8 +51,8 @@ def fixtures():
 
 
 class TestBuildPredictionsScorelines:
-    def test_includes_real_scoreline_columns(self, fitted_model, fixtures):
-        predictions = build_predictions(fixtures, fitted_model, SETTINGS)
+    def test_includes_real_scoreline_columns(self, models, fixtures):
+        predictions = build_predictions(fixtures, models, SETTINGS)
 
         for col in ["top_score", "top_score_prob", "alt_score", "alt_score_prob"]:
             assert col in predictions.columns
@@ -52,8 +67,8 @@ class TestBuildPredictionsScorelines:
             assert row["top_score_prob"] >= row["alt_score_prob"]
             assert row["top_score"] != row["alt_score"]
 
-    def test_top_score_prob_is_a_real_probability(self, fitted_model, fixtures):
-        predictions = build_predictions(fixtures, fitted_model, SETTINGS)
+    def test_top_score_prob_is_a_real_probability(self, models, fixtures):
+        predictions = build_predictions(fixtures, models, SETTINGS)
         assert (predictions["top_score_prob"] > 0).all()
         assert (predictions["top_score_prob"] <= 1).all()
 
@@ -84,8 +99,11 @@ class TestCalibrationStakeMultiplier:
             {"date": pd.Timestamp("2026-09-20"), "league": "E0", **same_match},
             {"date": pd.Timestamp("2026-09-21"), "league": "D1", **same_match},
         ])
+        # Same underlying fit for both leagues -- isolates the discount's
+        # effect from any difference a separately-fit D1 model would add.
+        models = {"E0": fitted_model, "D1": fitted_model}
 
-        predictions = build_predictions(fixtures, fitted_model, settings)
+        predictions = build_predictions(fixtures, models, settings)
         e0 = predictions[predictions["league"] == "E0"].iloc[0]
         d1 = predictions[predictions["league"] == "D1"].iloc[0]
 
@@ -94,15 +112,76 @@ class TestCalibrationStakeMultiplier:
         assert d1["kelly_raw"] == pytest.approx(e0["kelly_raw"] * 0.5, rel=1e-6)
         assert d1["stake_pct"] == pytest.approx(e0["stake_pct"] * 0.5, rel=1e-6)
 
-    def test_unlisted_leagues_are_unaffected(self, fitted_model, fixtures):
+    def test_unlisted_leagues_are_unaffected(self, models, fixtures):
         settings = {**SETTINGS, "edge": {**SETTINGS["edge"], "calibration_stake_multiplier": {"D1": 0.5}}}
-        discounted = build_predictions(fixtures, fitted_model, settings)
-        baseline = build_predictions(fixtures, fitted_model, SETTINGS)
+        discounted = build_predictions(fixtures, models, settings)
+        baseline = build_predictions(fixtures, models, SETTINGS)
         # `fixtures` is all-E0 -- absent from the D1-only multiplier map.
         pd.testing.assert_series_equal(discounted["stake_pct"], baseline["stake_pct"])
 
-    def test_missing_multiplier_config_is_backward_compatible(self, fitted_model, fixtures):
+    def test_missing_multiplier_config_is_backward_compatible(self, models, fixtures):
         # Module-level SETTINGS has no calibration_stake_multiplier key at
         # all -- must not raise (older configs, or settings.yaml edited
         # to remove it, shouldn't crash the pipeline).
-        build_predictions(fixtures, fitted_model, SETTINGS)
+        build_predictions(fixtures, models, SETTINGS)
+
+
+class TestFitModelPerLeague:
+    def test_fits_each_league_independently(self):
+        # Two leagues, deliberately different seeds (so, e.g., mu0_
+        # differs) -- fit_model must not pool them into one joint fit.
+        e0 = generate_synthetic_matches(seed=42)
+        d1 = generate_synthetic_matches(seed=7).assign(league="D1")
+        matches = pd.concat([e0, d1], ignore_index=True)
+
+        models = fit_model(matches, FIT_SETTINGS)
+
+        assert set(models.keys()) == {"E0", "D1"}
+        assert isinstance(models["E0"], DixonColesModel)
+        assert isinstance(models["D1"], DixonColesModel)
+        # Independently-fit models on differently-seeded data shouldn't
+        # coincidentally land on the exact same baseline -- a shared/
+        # joint fit would, by construction, give both the same mu0_.
+        assert models["E0"].mu0_ != models["D1"].mu0_
+
+    def test_one_league_failing_does_not_cost_the_others(self, monkeypatch):
+        e0 = generate_synthetic_matches(seed=42)
+        d1 = generate_synthetic_matches(seed=7).assign(league="D1")
+        matches = pd.concat([e0, d1], ignore_index=True)
+
+        real_fit = DixonColesModel.fit
+
+        def flaky_fit(self, league_matches, *args, **kwargs):
+            if (league_matches["league"] == "D1").all():
+                raise ValueError("synthetic failure for this test")
+            return real_fit(self, league_matches, *args, **kwargs)
+
+        monkeypatch.setattr(DixonColesModel, "fit", flaky_fit)
+
+        models = fit_model(matches, FIT_SETTINGS)
+        assert set(models.keys()) == {"E0"}  # D1 skipped, not raised
+
+    def test_every_league_failing_raises(self, monkeypatch):
+        matches = generate_synthetic_matches()
+
+        def always_fails(self, *args, **kwargs):
+            raise ValueError("synthetic failure for this test")
+
+        monkeypatch.setattr(DixonColesModel, "fit", always_fails)
+
+        with pytest.raises(ValueError, match="No league could be fit"):
+            fit_model(matches, FIT_SETTINGS)
+
+
+class TestBuildPredictionsMissingModel:
+    def test_a_league_with_no_fitted_model_is_skipped_not_raised(self, models, fixtures):
+        extra = pd.DataFrame([{
+            "date": pd.Timestamp("2026-09-22"), "league": "SP1", "home_team": "T00", "away_team": "T01",
+            "odds_home": 2.30, "odds_draw": 3.40, "odds_away": 3.10,
+        }])
+        mixed_fixtures = pd.concat([fixtures, extra], ignore_index=True)
+
+        predictions = build_predictions(mixed_fixtures, models, SETTINGS)  # models only has "E0"
+
+        assert "SP1" not in predictions["league"].values
+        assert set(predictions["league"]) == {"E0"}

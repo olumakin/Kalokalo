@@ -293,7 +293,7 @@ if admin and run_clicked:
 
     with st.spinner("Fitting Dixon-Coles model..."):
         try:
-            model = fit_model(matches, settings)
+            models = fit_model(matches, settings)
         except ValueError as exc:
             st.error(f"Model fit failed: {exc}")
             st.stop()
@@ -310,13 +310,13 @@ if admin and run_clicked:
         st.error("No fixtures available — live feed, free schedule, and the bundled fixture card all returned nothing.")
         st.stop()
 
-    predictions_out = build_predictions(fixtures, model, settings)
-    result = record_predictions_to_supabase(predictions_out, model, settings, price_source=fixture_source_used)
+    predictions_out = build_predictions(fixtures, models, settings)
+    result = record_predictions_to_supabase(predictions_out, models, settings, price_source=fixture_source_used)
 
     # Session-only handoff to the admin-only Model Diagnostics / Backtest
     # pages — never used by the public read path below. Stashed before the
     # failure check so a failed write doesn't also lose this.
-    st.session_state["model"] = model
+    st.session_state["models"] = models
     st.session_state["matches"] = matches
     st.session_state["settings"] = settings
 

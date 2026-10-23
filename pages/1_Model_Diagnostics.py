@@ -1,4 +1,12 @@
-"""Model Diagnostics — Dixon-Coles fitted parameters and team ratings."""
+"""Model Diagnostics — Dixon-Coles fitted parameters and team ratings.
+
+One row per league, not one shared fit: the live pipeline fits each
+league separately (src.pipeline.fit_model), matching what the WP3
+gate-evaluation harness validates (src.validation.gate_harness
+.run_league_evaluation) — a joint fit across the Big 5 pinned one
+shared baseline scoring rate and home advantage across leagues that
+genuinely differ on both, and was a real convergence risk besides.
+"""
 from __future__ import annotations
 
 import pandas as pd
@@ -11,32 +19,46 @@ require_admin()
 
 st.title("Model Diagnostics")
 
-model = st.session_state.get("model")
+models = st.session_state.get("models")
 matches = st.session_state.get("matches")
 
-if model is None:
-    st.info("Run the pipeline on the **Matchday** page first — this page inspects the last fitted model.")
+if not models:
+    st.info("Run the pipeline on the **Matchday** page first — this page inspects the last fitted models.")
     st.stop()
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Intercept (μ₀)", f"{model.mu0_:.3f}")
-c2.metric("Home advantage (γ)", f"{model.gamma_:.3f}", help="Home team's expected goals get an exp(γ) multiplier.")
-c3.metric("Low-score correlation (ρ)", f"{model.rho_:.3f}")
-c4.metric("Teams fitted", len(model.teams_))
+st.subheader("Per-league fit summary")
+summary = pd.DataFrame([
+    {
+        "league": league,
+        "intercept (μ₀)": model.mu0_,
+        "home advantage (γ)": model.gamma_,
+        "ρ": model.rho_,
+        "teams": len(model.teams_),
+        "regularized": len(model.regularized_teams_),
+        "converged": model.converged_,
+        "fallback": model.fallback_used_,
+    }
+    for league, model in sorted(models.items())
+])
+st.dataframe(
+    summary.style.format({"intercept (μ₀)": "{:+.3f}", "home advantage (γ)": "{:+.3f}", "ρ": "{:+.3f}"}),
+    use_container_width=True, hide_index=True,
+)
 
-status_cols = st.columns(3)
-status_cols[0].metric("Converged", "Yes" if model.converged_ else "No")
-status_cols[1].metric("Fallback to independent Poisson", "Yes" if model.fallback_used_ else "No")
-status_cols[2].metric("Regularized (new/promoted) teams", len(model.regularized_teams_))
-
-if model.fallback_used_:
+fallback_leagues = summary[summary["fallback"]]["league"].tolist()
+if fallback_leagues:
     st.warning(
-        "The optimizer did not converge with ρ free within the iteration budget, so this fit "
-        "fell back to an independent Poisson model (ρ=0), per the PID's failsafe convergence rule."
+        f"**{', '.join(fallback_leagues)}**: the optimizer did not converge with ρ free within the "
+        "iteration budget, so this league's fit fell back to an independent Poisson model (ρ=0), "
+        "per the PID's failsafe convergence rule. Predictions for these leagues are using no "
+        "low-score correlation correction."
     )
 
 st.divider()
 st.subheader("Team ratings")
+league = st.selectbox("League", sorted(models.keys()))
+model = models[league]
+
 st.caption(
     "α = attack strength, β = defense weakness (higher β = more goals conceded). "
     "Both are on a log-goals scale, zero-mean across eligible teams (sum-to-zero identifiability constraint). "
@@ -51,7 +73,8 @@ ratings = pd.DataFrame({
 ratings["regularized"] = ratings["team"].isin(model.regularized_teams_)
 ratings["reference_team"] = ratings["team"] == model.reference_team_
 if matches is not None and not matches.empty:
-    appearances = pd.concat([matches["home_team"], matches["away_team"]]).value_counts()
+    league_matches = matches[matches["league"] == league]
+    appearances = pd.concat([league_matches["home_team"], league_matches["away_team"]]).value_counts()
     ratings["matches"] = ratings["team"].map(appearances).fillna(0).astype(int)
 ratings = ratings.sort_values("attack", ascending=False).reset_index(drop=True)
 
