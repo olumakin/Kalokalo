@@ -24,10 +24,16 @@ fit:
   estimate for an upcoming, not-yet-played season; `gamma_by_season_`
   exposes the full history for diagnostics.
 - Smooth shrinkage: a team's attack/defense rating is penalized toward
-  the league mean by a continuous factor (min_matches / n_matches)
-  rather than being hard-cut to exactly (0, 0) below a threshold — a
-  team with 14 matches and one with 16 no longer get discontinuously
-  different treatment.
+  a target rating by a continuous factor (min_matches / n_matches)
+  rather than being hard-cut to exactly that target below a threshold —
+  a team with 14 matches and one with 16 no longer get discontinuously
+  different treatment. That target is the league mean (0, 0) by
+  default, but can be overridden per model instance via the
+  `promoted_prior` constructor argument — see `promoted_prior` below
+  and `src.models.promoted_prior.compute_promoted_team_priors`: a team
+  with next to no matches in the fit window is, in practice, almost
+  always a newly-promoted side, and a newly-promoted side's true rating
+  is typically below the league median, not at it.
 - Profiled rho: rho is optimized in an outer 1-D bounded search over
   the *profile* negative log-likelihood (mu0/gamma/alpha/beta
   re-optimized at each candidate rho), rather than jointly with every
@@ -78,7 +84,8 @@ class DixonColesModel:
         gamma_ : float  (most recently fitted season's home advantage)
         gamma_by_season_ : dict[str, float]  (every fitted season's gamma)
         alpha_, beta_ : dict[str, float]  (canonical team code -> rating,
-            smoothly shrunk toward 0 for teams with few matches)
+            smoothly shrunk toward `promoted_prior` for teams with few
+            matches)
         teams_ : list[str]
         reference_team_ : str
         regularized_teams_ : list[str]  (teams with fewer than
@@ -88,6 +95,16 @@ class DixonColesModel:
         converged_ : bool
         fallback_used_ : bool  (True if rho was forced to 0 after the fit
             at the profiled-optimal rho failed to converge)
+
+    Constructor arguments:
+        promoted_prior : tuple[float, float] | None  ((alpha, beta)
+            target the smooth-shrinkage penalty pulls a sparse team's
+            rating toward, and `predict`'s fallback for a team with no
+            fitted rating at all -- see
+            `src.models.promoted_prior.compute_promoted_team_priors`
+            for the per-league estimate this is meant to be filled
+            with. `None` (the default) keeps the original (0.0, 0.0)
+            league-median target.
     """
 
     def __init__(
@@ -97,12 +114,20 @@ class DixonColesModel:
         method: str = "L-BFGS-B",
         rho_init: float = -0.05,
         rho_bounds: tuple[float, float] = (-0.3, 0.3),
+        promoted_prior: tuple[float, float] | None = None,
     ):
         self.min_matches = min_matches
         self.max_iter = max_iter
         self.method = method
         self.rho_init = rho_init
         self.rho_bounds = rho_bounds
+        # Smooth-shrinkage target (see _negative_log_likelihood) for a
+        # sparse/unseen team, in place of the league median (0, 0) --
+        # typically a league-specific "typical newly-promoted team"
+        # rating (src.models.promoted_prior.compute_promoted_team_priors).
+        # Defaults to the original (0, 0) league-median target, so a
+        # caller that doesn't pass this gets exactly the old behavior.
+        self.promoted_prior = promoted_prior if promoted_prior is not None else (0.0, 0.0)
 
         self.mu0_: float | None = None
         self.gamma_: float | None = None
@@ -120,7 +145,7 @@ class DixonColesModel:
 
     def _negative_log_likelihood(self, params, home_idx, away_idx, season_idx, hg, ag,
                                   log_fact_h, log_fact_a, weights, n_teams, n_seasons,
-                                  rho, match_counts):
+                                  rho, match_counts, prior_alpha=0.0, prior_beta=0.0):
         mu0 = params[0]
         gamma = params[1:1 + n_seasons]
         a = params[1 + n_seasons: 1 + n_seasons + n_teams]
@@ -156,10 +181,14 @@ class DixonColesModel:
         nll = -np.sum(weights * loglik)
 
         # Smooth shrinkage: each free team's rating is ridge-penalized
-        # toward the league mean (0, already the sum-to-zero basis) by a
+        # toward a target rating -- (0, 0), the league mean on the
+        # sum-to-zero basis, unless `self.promoted_prior` says
+        # otherwise (see module docstring / promoted_prior.py) -- by a
         # weight that scales continuously with how little data it has,
         # instead of the old hard min_matches on/off cutoff.
-        shrink_penalty = 0.5 * np.sum((self.min_matches / match_counts) * (a ** 2 + b ** 2))
+        shrink_penalty = 0.5 * np.sum(
+            (self.min_matches / match_counts) * ((a - prior_alpha) ** 2 + (b - prior_beta) ** 2)
+        )
 
         return nll + shrink_penalty
 
@@ -188,9 +217,12 @@ class DixonColesModel:
         it stays correct across a season boundary where the team set
         changes (promotion/relegation): a team absent from `warm_start`
         (newly promoted, or simply new to this repo's history) starts
-        from (0.0, 0.0) — the same promoted-team prior smooth shrinkage
-        already pulls sparse teams toward, so a missing warm-start entry
-        is never a special case to handle, just the ordinary default.
+        the optimizer from (0.0, 0.0) regardless -- what it's shrunk
+        *toward* during optimization is `self.promoted_prior`, not
+        necessarily this same (0.0, 0.0) starting guess (see
+        `__init__` / `_negative_log_likelihood`'s shrink_penalty). A
+        missing warm-start entry is never a special case to handle,
+        just the ordinary default starting point.
         """
         goal_col_h, goal_col_a = goal_columns
         df = matches.copy()
@@ -254,13 +286,15 @@ class DixonColesModel:
                     x0[1 + n_seasons + i] = prior[0]
                     x0[1 + n_seasons + n + i] = prior[1]
 
+        prior_alpha, prior_beta = self.promoted_prior
+
         def fit_at_rho(rho: float):
             bounds = [(None, None)] * len(x0)
             return minimize(
                 self._negative_log_likelihood,
                 x0,
                 args=(home_idx, away_idx, season_idx, hg, ag, log_fact_h, log_fact_a,
-                      weights, n, n_seasons, rho, match_counts),
+                      weights, n, n_seasons, rho, match_counts, prior_alpha, prior_beta),
                 method=self.method,
                 bounds=bounds,
                 options={"maxiter": self.max_iter},
@@ -335,8 +369,12 @@ class DixonColesModel:
     def predict(self, home_team: str, away_team: str) -> tuple[float, float, float]:
         """Return (lambda, mu, rho) expected-goals parameters for a fixture.
 
-        Teams unseen during fitting default to league-median rating (0, 0),
-        per the promoted/new-team regularization rule. Home advantage
+        Teams unseen during fitting default to `self.promoted_prior`
+        (the league median (0, 0) unless a promoted-team prior was
+        supplied — see `__init__`), per the promoted/new-team
+        regularization rule: a team with zero matches in the fit
+        window is, in practice, the same situation `regularized_teams_`
+        already handles at the sparse-but-nonzero end. Home advantage
         uses `gamma_` — the most recently fitted season's value, the best
         available estimate for a fixture in a season not yet played;
         `gamma_by_season_` holds the full per-season history.
@@ -344,15 +382,16 @@ class DixonColesModel:
         if self.mu0_ is None:
             raise RuntimeError("Model has not been fit yet")
 
-        alpha_h = self.alpha_.get(home_team, 0.0)
-        beta_h = self.beta_.get(home_team, 0.0)
-        alpha_a = self.alpha_.get(away_team, 0.0)
-        beta_a = self.beta_.get(away_team, 0.0)
+        prior_alpha, prior_beta = self.promoted_prior
+        alpha_h = self.alpha_.get(home_team, prior_alpha)
+        beta_h = self.beta_.get(home_team, prior_beta)
+        alpha_a = self.alpha_.get(away_team, prior_alpha)
+        beta_a = self.beta_.get(away_team, prior_beta)
 
         if home_team not in self.teams_:
-            logger.warning("Unseen team %r; defaulting to league-median rating", home_team)
+            logger.warning("Unseen team %r; defaulting to promoted-team prior rating", home_team)
         if away_team not in self.teams_:
-            logger.warning("Unseen team %r; defaulting to league-median rating", away_team)
+            logger.warning("Unseen team %r; defaulting to promoted-team prior rating", away_team)
 
         lam = float(np.exp(self.mu0_ + alpha_h + beta_a + self.gamma_))
         mu = float(np.exp(self.mu0_ + alpha_a + beta_h))

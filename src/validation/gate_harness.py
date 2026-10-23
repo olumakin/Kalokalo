@@ -104,15 +104,17 @@ def assert_datetime_utc(df: pd.DataFrame, col: str = "date") -> None:
 def _default_fit_func(
     train_df: pd.DataFrame, xi: float, warm_start: dict[str, tuple[float, float]] | None,
     max_iter: int, min_matches: int, method: str,
+    promoted_prior: tuple[float, float] | None = None,
 ) -> DixonColesModel:
-    return DixonColesModel(min_matches=min_matches, max_iter=max_iter, method=method).fit(
-        train_df, xi=xi, warm_start=warm_start,
-    )
+    return DixonColesModel(
+        min_matches=min_matches, max_iter=max_iter, method=method, promoted_prior=promoted_prior,
+    ).fit(train_df, xi=xi, warm_start=warm_start)
 
 
 def _cache_key(
     league: str, matchweek_start: str, xi: float, code_version: str,
     rolling_window_days: int, min_matches_per_team: int, method: str, max_iter: int,
+    promoted_prior: tuple[float, float] | None = None,
 ) -> str:
     """Must include every parameter that affects train_df's content or
     the fit call's own hyperparameters, not just league/date/xi/code --
@@ -124,10 +126,15 @@ def _cache_key(
     trained on the first's window). retrain_every_days/min_train_matches
     are deliberately left out -- they only affect *whether* a retrain
     happens at a given date, not what train_df contains once it does.
+    promoted_prior changes the fit itself (the smooth-shrinkage target
+    -- src.models.dixon_coles), so two runs differing only in which
+    promoted-team prior was supplied must not collide either.
     """
+    prior_alpha, prior_beta = promoted_prior if promoted_prior is not None else (0.0, 0.0)
     raw = (
         f"{league}|{matchweek_start}|{xi:.6f}|{code_version}|"
-        f"{rolling_window_days}|{min_matches_per_team}|{method}|{max_iter}"
+        f"{rolling_window_days}|{min_matches_per_team}|{method}|{max_iter}|"
+        f"{prior_alpha:.6f}|{prior_beta:.6f}"
     )
     return hashlib.sha1(raw.encode()).hexdigest()  # noqa: S324 — cache key, not a security boundary
 
@@ -177,8 +184,22 @@ def run_league_evaluation(
     on_retrain: Callable[[pd.Timestamp, pd.DataFrame], None] | None = None,
     calibrate: bool = False,
     calibration_min_resolved: int = DEFAULT_CALIBRATION_MIN_RESOLVED,
+    promoted_prior: tuple[float, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Strict chronological walk-forward evaluation for one league.
+
+    `promoted_prior`, if given, is forwarded to every retrain's
+    `fit_func` call as the DixonColesModel smooth-shrinkage target for
+    a sparse team (see src.models.promoted_prior
+    .compute_promoted_team_priors) in place of the league median (0,
+    0) -- a single (alpha, beta) pair for this league, computed once
+    from the full historical corpus outside this function (the
+    rolling window this function itself retrains on is exactly the
+    reason an in-window sparse team's own data can't supply this
+    estimate). Only forwarded to `fit_func` when not None, so a custom
+    `fit_func` with the old fixed signature (as used by this module's
+    own tests) keeps working unchanged when the caller doesn't pass
+    this.
 
     `calibrate`, if True, applies a walk-forward draw-probability
     recalibration (src.validation.calibration.calibration_slope_intercept
@@ -268,16 +289,20 @@ def run_league_evaluation(
                 key = _cache_key(
                     league, str(current_date.date()), xi, code_version,
                     rolling_window_days, min_matches_per_team, method, max_iter,
+                    promoted_prior,
                 )
                 cached = _load_cached_model(cache_dir, key)
                 if cached is not None:
                     model = cached
                 else:
+                    fit_kwargs = dict(
+                        xi=xi, warm_start=prev_team_params,
+                        max_iter=max_iter, min_matches=min_matches_per_team, method=method,
+                    )
+                    if promoted_prior is not None:
+                        fit_kwargs["promoted_prior"] = promoted_prior
                     try:
-                        model = fit_func(
-                            train_df, xi=xi, warm_start=prev_team_params,
-                            max_iter=max_iter, min_matches=min_matches_per_team, method=method,
-                        )
+                        model = fit_func(train_df, **fit_kwargs)
                     except ValueError as exc:
                         logger.warning("Skipping retrain for %s at %s: %s", league, current_date, exc)
                         model = None
@@ -380,6 +405,7 @@ def run_gate_evaluation(
     matches: pd.DataFrame,
     xi_by_league: dict[str, float],
     run_id: str | None = None,
+    promoted_prior_by_league: dict[str, tuple[float, float]] | None = None,
     **kwargs,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run run_league_evaluation for every league in `xi_by_league`
@@ -389,15 +415,24 @@ def run_gate_evaluation(
     tradeoff); each league's fits are still cached to disk if
     `cache_dir` is passed through kwargs, so a repeated report over the
     same corpus/code version doesn't refit regardless.
+
+    `promoted_prior_by_league`, if given, maps league -> (alpha, beta)
+    (src.models.promoted_prior.compute_promoted_team_priors) and is
+    looked up per league and forwarded as that league's
+    `run_league_evaluation(..., promoted_prior=...)`. A league absent
+    from the map gets `None` -- run_league_evaluation's own default
+    (the original league-median target), not a crash.
     """
     import uuid
     run_id = run_id or str(uuid.uuid4())
     code_version = kwargs.pop("code_version", None) or get_code_version()
+    promoted_prior_by_league = promoted_prior_by_league or {}
 
     all_results, all_exclusions = [], []
     for league, xi in xi_by_league.items():
         results, exclusions = run_league_evaluation(
-            matches, league, xi, run_id=run_id, code_version=code_version, **kwargs,
+            matches, league, xi, run_id=run_id, code_version=code_version,
+            promoted_prior=promoted_prior_by_league.get(league), **kwargs,
         )
         all_results.append(results)
         all_exclusions.append(exclusions)

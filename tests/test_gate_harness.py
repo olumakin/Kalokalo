@@ -178,6 +178,60 @@ class TestRunLeagueEvaluation:
         # (and therefore the optimizer) is never called again.
         assert calls["n"] == first_calls
 
+    def test_promoted_prior_is_forwarded_to_fit_func_when_given(self):
+        matches = _priced_matches(n_teams=6, rounds=6)
+        seen_priors = []
+
+        def spying_fit_func(train_df, xi, warm_start, max_iter, min_matches, method, promoted_prior=None):
+            seen_priors.append(promoted_prior)
+            return _default_fit_func(train_df, xi, warm_start, max_iter, min_matches, method, promoted_prior)
+
+        run_league_evaluation(
+            matches, "E0", xi=0.0065, fit_func=spying_fit_func, min_train_matches=50,
+            promoted_prior=(-0.3, 0.3),
+        )
+        assert len(seen_priors) > 0
+        assert all(p == (-0.3, 0.3) for p in seen_priors)
+
+    def test_promoted_prior_omitted_keeps_old_fit_func_signature_working(self):
+        # A fit_func with the pre-promoted_prior fixed signature (as
+        # used throughout this test module) must keep working when the
+        # caller never passes promoted_prior -- no unexpected kwarg.
+        matches = _priced_matches(n_teams=6, rounds=6)
+
+        def fixed_signature_fit_func(train_df, xi, warm_start, max_iter, min_matches, method):
+            return _default_fit_func(train_df, xi, warm_start, max_iter, min_matches, method)
+
+        results, _ = run_league_evaluation(
+            matches, "E0", xi=0.0065, fit_func=fixed_signature_fit_func, min_train_matches=50,
+        )
+        assert not results.empty
+
+    def test_cache_is_not_reused_across_different_promoted_priors(self, tmp_path):
+        # Two runs sharing a cache_dir but differing only in
+        # promoted_prior must not collide -- the prior changes the fit
+        # itself (the shrinkage target), so a cache hit here would
+        # silently serve the other run's fit.
+        matches = _priced_matches(n_teams=6, rounds=6)
+        calls = {"n": 0}
+
+        def counting_fit_func(train_df, xi, warm_start, max_iter, min_matches, method, promoted_prior=None):
+            calls["n"] += 1
+            return _default_fit_func(train_df, xi, warm_start, max_iter, min_matches, method, promoted_prior)
+
+        run_league_evaluation(
+            matches, "E0", xi=0.0065, fit_func=counting_fit_func, min_train_matches=50,
+            cache_dir=tmp_path, code_version="test-version", promoted_prior=(0.0, 0.0),
+        )
+        first_calls = calls["n"]
+        assert first_calls > 0
+
+        run_league_evaluation(
+            matches, "E0", xi=0.0065, fit_func=counting_fit_func, min_train_matches=50,
+            cache_dir=tmp_path, code_version="test-version", promoted_prior=(-0.5, 0.5),
+        )
+        assert calls["n"] > first_calls
+
     def test_cache_is_not_reused_across_different_rolling_window_days(self, tmp_path):
         # Two runs sharing a cache_dir but differing only in
         # rolling_window_days must not collide: train_df's content
@@ -329,3 +383,23 @@ class TestRunGateEvaluation:
         matches = _priced_matches(n_teams=6, rounds=6)
         results, _ = run_gate_evaluation(matches, xi_by_league={"E0": 0.0065}, min_train_matches=50)
         assert results["run_id"].nunique() == 1
+
+    def test_promoted_prior_by_league_is_looked_up_per_league(self):
+        e0 = _priced_matches(n_teams=6, rounds=6, league="E0", seed=1)
+        sp1 = _priced_matches(n_teams=6, rounds=6, league="SP1", seed=2)
+        matches = pd.concat([e0, sp1], ignore_index=True)
+        seen = {}
+
+        def spying_fit_func(train_df, xi, warm_start, max_iter, min_matches, method, promoted_prior=None):
+            league = train_df["league"].iloc[0]
+            seen.setdefault(league, promoted_prior)
+            return _default_fit_func(train_df, xi, warm_start, max_iter, min_matches, method, promoted_prior)
+
+        run_gate_evaluation(
+            matches, xi_by_league={"E0": 0.0065, "SP1": 0.0065}, min_train_matches=50,
+            fit_func=spying_fit_func, promoted_prior_by_league={"E0": (-0.3, 0.3)},
+        )
+        assert seen["E0"] == (-0.3, 0.3)
+        # SP1 has no entry in the map -- must fall back to None (the
+        # original league-median target), not crash.
+        assert seen["SP1"] is None

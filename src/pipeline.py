@@ -25,6 +25,7 @@ from src.ingestion.historical import load_all, load_settings, season_codes
 from src.ingestion.normalizer import normalize_dataframe
 from src.ingestion.odds_feed import load_fixture_csv
 from src.models.dixon_coles import DixonColesModel
+from src.models.promoted_prior import compute_promoted_team_priors
 from src.models.simulator import match_probabilities, top_scorelines
 from src.tracking.supabase_ledger import get_supabase_client, prediction_row_from_pipeline, write_predictions
 
@@ -168,6 +169,7 @@ def load_historical_matches(
 
 def fit_model(
     matches: pd.DataFrame, settings: dict, goal_columns: tuple[str, str] = ("home_goals", "away_goals"),
+    promoted_prior_by_league: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, DixonColesModel]:
     """Fit one Dixon-Coles model per league, not one joint fit across all
     of them -- returns {league: fitted_model}.
@@ -185,8 +187,17 @@ def fit_model(
     (src.validation.gate_harness.run_league_evaluation fits per league);
     the live pipeline fitting jointly instead meant the CLV evidence WP3
     produced never actually applied to what this function returned.
+
+    `promoted_prior_by_league`, if given, maps league -> (alpha, beta)
+    (src.models.promoted_prior.compute_promoted_team_priors, computed
+    by the caller from the *full* historical corpus -- see `run`
+    below) and is passed to each league's DixonColesModel as its
+    smooth-shrinkage target for sparse teams, in place of the league
+    median (0, 0). A league absent from the map (or when the whole
+    argument is omitted) keeps the original (0, 0) target.
     """
     model_cfg = settings["model"]
+    promoted_prior_by_league = promoted_prior_by_league or {}
     models: dict[str, DixonColesModel] = {}
     for league in sorted(matches["league"].unique()):
         league_matches = matches[matches["league"] == league]
@@ -196,6 +207,7 @@ def fit_model(
                 max_iter=model_cfg["max_optimizer_iterations"],
                 method=model_cfg["optimizer_method"],
                 rho_init=model_cfg["rho_init"],
+                promoted_prior=promoted_prior_by_league.get(league),
             ).fit(league_matches, xi=model_cfg["xi_decay"], goal_columns=goal_columns)
         except ValueError as exc:
             # One league's fit failing (e.g. too little data) shouldn't
@@ -272,17 +284,31 @@ def run(
     `seasons_back` is bumped up automatically if it wouldn't cover
     `window_days` worth of raw data -- it only controls how many whole
     season CSVs get fetched, not the window itself.
+
+    The promoted-team prior (src.models.promoted_prior) is computed
+    from the *full* loaded corpus before it's trimmed to `window_days`
+    -- a newly-promoted team's own rolling-window data is exactly what
+    the prior exists to supplement, so the estimate can't come from
+    the same trimmed window the model fits on.
     """
     settings = load_settings() if settings_path is None else yaml.safe_load(open(settings_path))
     window_days = window_days if window_days is not None else settings["model"]["rolling_window_days"]
     seasons_back = max(seasons_back, math.ceil(window_days / 365) + 1)
 
-    matches = load_historical_matches(leagues, seasons_back, settings, window_days=window_days)
-    if matches.empty:
+    full_matches = load_historical_matches(leagues, seasons_back, settings, window_days=None)
+    if full_matches.empty:
         logger.error("No historical matches available; cannot fit model. Populate data/historical/ or check network access.")
         return pd.DataFrame()
 
-    models = fit_model(matches, settings)
+    promoted_priors = compute_promoted_team_priors(
+        full_matches, min_matches_for_team_rating=settings["model"]["min_matches_for_team_rating"],
+    )
+    matches = trim_to_rolling_window(full_matches, window_days)
+    if matches.empty:
+        logger.error("No historical matches within the %d-day window; cannot fit model.", window_days)
+        return pd.DataFrame()
+
+    models = fit_model(matches, settings, promoted_prior_by_league=promoted_priors)
 
     fixtures = load_fixture_csv(fixtures_path)
     if fixtures.empty:

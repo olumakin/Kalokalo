@@ -46,6 +46,7 @@ from src.ingestion.data_loader import select_entry_close_odds, validate_matches 
 from src.ingestion.historical import load_all, load_settings, season_codes  # noqa: E402
 from src.ingestion.normalizer import CANONICAL_COLUMNS, load_team_mappings, resolve_team  # noqa: E402
 from src.ingestion.data_loader import select_match_odds  # noqa: E402
+from src.models.promoted_prior import compute_promoted_team_priors  # noqa: E402
 from src.validation.calibration import calibration_slope_intercept  # noqa: E402
 from src.validation.clv import evaluate_league_clv  # noqa: E402
 from src.validation.gate_harness import (  # noqa: E402
@@ -128,6 +129,16 @@ def main() -> None:
     parser.add_argument("--no-calibrate", dest="calibrate", action="store_false",
                          help="Disable recalibration -- reproduces the pre-fix WP3 baseline run.")
     parser.add_argument("--calibration-min-resolved", type=int, default=DEFAULT_CALIBRATION_MIN_RESOLVED)
+    parser.add_argument(
+        "--promoted-prior", dest="promoted_prior", action="store_true", default=True,
+        help="Per-league promoted-team rating prior (src.models.promoted_prior) as the "
+             "DixonColesModel smooth-shrinkage target for a sparse team, in place of the "
+             "league median (0, 0) (default: on).",
+    )
+    parser.add_argument(
+        "--no-promoted-prior", dest="promoted_prior", action="store_false",
+        help="Disable the promoted-team prior -- reproduces the original league-median-target baseline.",
+    )
     args = parser.parse_args()
 
     leagues = args.leagues.split(",")
@@ -161,6 +172,19 @@ def main() -> None:
     print(f"Entry+close price coverage: {len(priced)}/{len(matches)} rows "
           f"({len(priced) / max(len(matches), 1):.1%}) -- CLV can only be evaluated on these.")
 
+    promoted_prior_by_league = None
+    print(f"promoted_prior={args.promoted_prior}")
+    if args.promoted_prior:
+        # From the full multi-season `matches` loaded above -- not the
+        # rolling window each retrain point inside run_gate_evaluation
+        # trims to internally, which is exactly the data a newly-
+        # promoted team's own in-window rating is too sparse to supply.
+        promoted_prior_by_league = compute_promoted_team_priors(
+            matches, min_matches_for_team_rating=args.min_matches_per_team,
+        )
+        for lg, (a, b) in sorted(promoted_prior_by_league.items()):
+            print(f"  promoted-team prior [{lg}]: alpha={a:.4f} beta={b:.4f}")
+
     def on_retrain(current_date, train_df):
         print(f"  retrain at {current_date.date()} ({len(train_df)} matches in window)")
 
@@ -176,6 +200,7 @@ def main() -> None:
         devig_method=args.devig_method,
         min_ev=args.min_ev,
         cache_dir=args.cache_dir,
+        promoted_prior_by_league=promoted_prior_by_league,
         on_retrain=on_retrain,
         calibrate=args.calibrate,
         calibration_min_resolved=args.calibration_min_resolved,

@@ -337,6 +337,55 @@ class TestDixonColesFit:
         for t in ("T10", "T11", "T12", "T13", "T14"):
             assert abs(model2.alpha_[t]) < 1.0
 
+    def test_promoted_prior_defaults_to_the_old_league_median_target(self):
+        model = DixonColesModel(min_matches=15)
+        assert model.promoted_prior == (0.0, 0.0)
+
+    def test_sparse_team_shrinks_toward_the_promoted_prior_not_zero(self):
+        # Same sparse-team setup as test_sparse_team_gets_a_real_but_
+        # shrunk_rating_not_a_hard_zero, but with a deliberately
+        # off-median promoted_prior supplied -- the sparse team's final
+        # rating should land near that prior, not near (0, 0).
+        matches = generate_synthetic_matches(n_teams=10, rounds=6)
+        rare_team_rows = matches.iloc[:3].copy()
+        rare_team_rows["home_team"] = "RARE"
+        matches = pd.concat([matches, rare_team_rows], ignore_index=True)
+
+        prior = (-0.6, 0.6)
+        model = DixonColesModel(min_matches=15, promoted_prior=prior).fit(matches, xi=0.0065)
+        baseline = DixonColesModel(min_matches=15).fit(matches, xi=0.0065)
+
+        assert "RARE" in model.regularized_teams_
+        # Pulled toward the supplied prior, not toward 0 like the
+        # unmodified (promoted_prior=None) baseline fit on the same data.
+        assert model.alpha_["RARE"] < baseline.alpha_["RARE"]
+        assert model.beta_["RARE"] > baseline.beta_["RARE"]
+
+    def test_well_observed_teams_are_largely_unaffected_by_the_prior(self):
+        # The shrinkage weight (min_matches / n_i) is tiny for a
+        # well-observed team regardless of what the target is -- a
+        # non-trivial promoted_prior shouldn't meaningfully move a
+        # team with plenty of its own data.
+        matches = generate_synthetic_matches(n_teams=10, rounds=6)
+        prior = (-0.6, 0.6)
+        with_prior = DixonColesModel(min_matches=15, promoted_prior=prior).fit(matches, xi=0.0065)
+        baseline = DixonColesModel(min_matches=15).fit(matches, xi=0.0065)
+
+        for t in baseline.teams_:
+            assert with_prior.alpha_[t] == pytest.approx(baseline.alpha_[t], abs=0.05)
+            assert with_prior.beta_[t] == pytest.approx(baseline.beta_[t], abs=0.05)
+
+    def test_predict_defaults_unseen_team_to_the_promoted_prior(self):
+        matches = generate_synthetic_matches()
+        prior = (-0.4, 0.3)
+        model = DixonColesModel(min_matches=15, promoted_prior=prior).fit(matches, xi=0.0065)
+
+        lam, mu, rho = model.predict("UNKNOWN_TEAM", "T01")
+        expected_lam = np.exp(model.mu0_ + prior[0] + model.beta_["T01"] + model.gamma_)
+        expected_mu = np.exp(model.mu0_ + model.alpha_["T01"] + prior[1])
+        assert lam == pytest.approx(expected_lam)
+        assert mu == pytest.approx(expected_mu)
+
     def test_fit_drops_rows_with_null_goal_column(self):
         matches = generate_synthetic_matches()
         matches["home_xg"] = matches["home_goals"].astype(float)

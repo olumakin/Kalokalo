@@ -173,6 +173,25 @@ class TestFitModelPerLeague:
             fit_model(matches, FIT_SETTINGS)
 
 
+class TestFitModelPromotedPrior:
+    def test_promoted_prior_by_league_is_passed_to_the_right_league_s_model(self):
+        e0 = generate_synthetic_matches(seed=42)
+        d1 = generate_synthetic_matches(seed=7).assign(league="D1")
+        matches = pd.concat([e0, d1], ignore_index=True)
+
+        models = fit_model(matches, FIT_SETTINGS, promoted_prior_by_league={"E0": (-0.4, 0.4)})
+
+        assert models["E0"].promoted_prior == (-0.4, 0.4)
+        # D1 has no entry in the map -- must keep the original (0, 0)
+        # league-median target, not crash or reuse E0's prior.
+        assert models["D1"].promoted_prior == (0.0, 0.0)
+
+    def test_omitted_promoted_prior_by_league_is_backward_compatible(self):
+        matches = generate_synthetic_matches()
+        models = fit_model(matches, FIT_SETTINGS)
+        assert models["E0"].promoted_prior == (0.0, 0.0)
+
+
 class TestBuildPredictionsMissingModel:
     def test_a_league_with_no_fitted_model_is_skipped_not_raised(self, models, fixtures):
         extra = pd.DataFrame([{

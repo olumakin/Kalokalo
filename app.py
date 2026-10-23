@@ -27,6 +27,7 @@ from src.ingestion.odds_feed import (
     FIXTURE_SOURCE_SAMPLE_CARD,
     get_upcoming_fixtures,
 )
+from src.models.promoted_prior import compute_promoted_team_priors
 from src.models.simulator import build_score_matrix, top_scorelines
 from src.pipeline import build_predictions, fit_model, load_historical_matches, record_predictions_to_supabase
 from src.tracking.supabase_ledger import fetch_gate_status, fetch_latest_predictions, is_ledger_online
@@ -227,6 +228,25 @@ def _cached_historical_download(
     return load_historical_matches(list(leagues), seasons_back, _settings, window_days=window_days)
 
 
+@st.cache_data(show_spinner=False, ttl="6h")
+def _cached_promoted_priors(
+    leagues: tuple[str, ...], seasons_back: int, _settings: dict,
+) -> dict[str, tuple[float, float]]:
+    """Per-league promoted-team rating prior (src.models.promoted_prior),
+    estimated from the *full* historical corpus -- not the rolling
+    window `_cached_historical_download` trims to, which is exactly
+    the data a newly-promoted team's own in-window rating is too
+    sparse to supply. Season CSVs are already disk-cached by
+    src.ingestion.historical, so this doesn't re-hit the network;
+    cached separately here only to skip re-running the per-season
+    fits this requires on every rerun.
+    """
+    full_matches = load_historical_matches(list(leagues), seasons_back, _settings, window_days=None)
+    return compute_promoted_team_priors(
+        full_matches, min_matches_for_team_rating=_settings["model"]["min_matches_for_team_rating"],
+    )
+
+
 @st.cache_data(show_spinner=False, ttl="15m")
 def _cached_upcoming_fixtures(leagues: tuple[str, ...], api_key: str) -> tuple[pd.DataFrame, str]:
     return get_upcoming_fixtures(list(leagues), api_key=api_key or None)
@@ -361,7 +381,8 @@ if admin and run_clicked:
 
     with st.spinner("Fitting Dixon-Coles model..."):
         try:
-            models = fit_model(matches, settings)
+            promoted_priors = _cached_promoted_priors(tuple(dl_leagues), dl_seasons_back, settings)
+            models = fit_model(matches, settings, promoted_prior_by_league=promoted_priors)
         except ValueError as exc:
             st.error(f"Model fit failed: {exc}")
             st.stop()
