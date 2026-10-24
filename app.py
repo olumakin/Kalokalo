@@ -516,13 +516,6 @@ else:
             if not non_null.empty:
                 window_days_used = non_null.iloc[0]
         window_is_validated = window_days_used == settings["model"]["rolling_window_days"]
-        if not window_is_validated:
-            shown = f"{window_days_used}d" if window_days_used is not None else "unknown"
-            st.info(
-                f"This run's historical window ({shown}) isn't the WP3-validated "
-                f"{settings['model']['rolling_window_days']}d window, so every fixture below "
-                f"shows as forecast-only, even in a league whose gate has otherwise cleared."
-            )
 
         rows = list(display_df.iterrows())
         for i in range(0, len(rows), 2):
