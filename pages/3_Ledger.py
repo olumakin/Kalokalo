@@ -13,7 +13,10 @@ st.set_page_config(page_title="DVPE — Ledger", page_icon="📒", layout="wide"
 require_admin()
 
 st.title("Prediction Ledger")
-st.caption("Every prediction the pipeline has generated, for post-hoc calibration and CLV audit.")
+st.caption(
+    "Every prediction the pipeline has generated, and how well 'High Draw Likelihood' calls "
+    "have actually done once fixtures are settled below."
+)
 
 # Must match app.py's HIGH_TIE_P_DRAW -- the same threshold driving the
 # "HIGH DRAW LIKELIHOOD" / "HIGH TIE POTENTIAL" badge on the Matchday page.
@@ -54,9 +57,12 @@ if staked_only:
     filtered = filtered[filtered["staked"]]
 
 c1, c2, c3 = st.columns(3)
-c1.metric("Predictions logged", len(df))
-c2.metric("Shadow-staked", int(df["staked"].sum()))
-c3.metric("Pipeline runs", df["run_id"].nunique())
+c1.metric("Predictions logged", len(df), help="Every fixture the pipeline has scored, across all runs.")
+c2.metric(
+    "Shadow-staked", int(df["staked"].sum()),
+    help="Predictions that qualified for a shadow stake -- a what-if figure, not a validated recommendation.",
+)
+c3.metric("Pipeline runs", df["run_id"].nunique(), help="How many separate times the pipeline has been run.")
 
 # --------------------------------------------------------------------------
 # Historical hit rate — High Draw Likelihood forecast vs. actual result.
@@ -66,29 +72,54 @@ c3.metric("Pipeline runs", df["run_id"].nunique())
 # --------------------------------------------------------------------------
 st.divider()
 st.subheader("Historical hit rate: High Draw Likelihood vs. actual result")
+st.caption(
+    f"Of the fixtures flagged High Draw Likelihood (model draw probability ≥ {HIGH_TIE_P_DRAW:.0%}) "
+    "that have since been settled, how many actually ended in a draw. A simple track record -- "
+    "separate from the CLV-based testing that decides which leagues show as validated on the "
+    "Matchday page."
+)
 
 hit_rate_df = historical_hit_rate(df, settlements, HIGH_TIE_P_DRAW)
 if hit_rate_df.empty:
-    st.caption("No settled fixtures were forecast High Draw Likelihood yet.")
+    st.info(
+        "No settled High Draw Likelihood fixtures yet. Use **Reconcile an outcome** below to "
+        "record results as they come in -- this fills in automatically from there."
+    )
 else:
     total_n = int(hit_rate_df["n"].sum())
     total_hits = int(hit_rate_df["hits"].sum())
     st.metric(
         "Hit rate", f"{total_hits / total_n:.1%}",
-        help=f"{total_hits} of {total_n} settled High Draw Likelihood fixtures",
+        help=f"{total_hits} of {total_n} settled High Draw Likelihood fixtures actually ended in a draw.",
+    )
+    display_hit_rate = hit_rate_df.rename(
+        columns={"league": "League", "n": "Settled fixtures", "hits": "Actual draws", "hit_rate": "Hit rate"},
     )
     st.dataframe(
-        hit_rate_df.style.format({"hit_rate": "{:.1%}"}), use_container_width=True, hide_index=True,
+        display_hit_rate.style.format({"Hit rate": "{:.1%}"}), use_container_width=True, hide_index=True,
     )
 
 st.subheader(f"Ledger entries ({len(filtered)})")
+st.caption("Every scored fixture behind the numbers above, most recent first — the full audit trail.")
 display_cols = [
     "created_at", "fixture_id", "league", "home_id", "away_id",
     "p_home", "p_draw", "p_away", "entry_draw", "market_p_draw", "ev_entry",
     "stake_shadow", "qualified" if "qualified" in filtered.columns else "run_id",
 ]
 display_cols = [c for c in display_cols if c in filtered.columns]
-st.dataframe(filtered[display_cols].sort_values("created_at", ascending=False), use_container_width=True, height=420)
+friendly_names = {
+    "created_at": "Logged at", "fixture_id": "Fixture", "league": "League", "home_id": "Home", "away_id": "Away",
+    "p_home": "P(Home)", "p_draw": "P(Draw)", "p_away": "P(Away)", "entry_draw": "Entry odds (draw)",
+    "market_p_draw": "Market P(Draw)", "ev_entry": "EV", "stake_shadow": "Shadow stake",
+    "qualified": "Qualified", "run_id": "Run",
+}
+ledger_display = filtered[display_cols].sort_values("created_at", ascending=False).rename(columns=friendly_names)
+pct_fmt = {friendly_names[c]: "{:.1%}" for c in ["p_home", "p_draw", "p_away", "market_p_draw", "stake_shadow"] if c in display_cols}
+if "ev_entry" in display_cols:
+    pct_fmt[friendly_names["ev_entry"]] = "{:+.1%}"
+if "entry_draw" in display_cols:
+    pct_fmt[friendly_names["entry_draw"]] = "{:.2f}"
+st.dataframe(ledger_display.style.format(pct_fmt), use_container_width=True, height=420)
 st.download_button(
     "Download ledger (CSV)", filtered.to_csv(index=False).encode("utf-8"),
     file_name="dvpe_ledger.csv", mime="text/csv",
@@ -100,8 +131,9 @@ st.download_button(
 st.divider()
 st.subheader("Reconcile an outcome")
 st.caption(
-    "Backfill the actual result for a previously logged prediction. This appends a row to "
-    "the `settlements` table — it never modifies the original prediction."
+    "Backfill the actual result for a previously logged prediction. This is what feeds the "
+    "hit-rate tracker above — it appends a row to the `settlements` table and never modifies "
+    "the original prediction."
 )
 
 open_entries = df[~df["settled"]]
