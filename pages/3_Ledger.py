@@ -7,7 +7,7 @@ import streamlit as st
 from src.ingestion.historical import fetch_recent_results, load_settings
 from src.tracking.supabase_ledger import (
     auto_settle_predictions,
-    fetch_predictions,
+    fetch_predictions_since,
     high_draw_likelihood_results,
     is_ledger_online,
     latest_settlement_by_fixture,
@@ -19,7 +19,7 @@ st.set_page_config(page_title="DVPE — Ledger", page_icon="📒", layout="wide"
 require_admin()
 
 st.title("Prediction Ledger")
-st.caption("Every prediction the pipeline has generated, for post-hoc calibration and CLV audit.")
+st.caption("This season's predictions, for post-hoc calibration and CLV audit.")
 
 # Must match app.py's HIGH_TIE_P_DRAW -- the same threshold driving the
 # "HIGH DRAW LIKELIHOOD" / "HIGH TIE POTENTIAL" badge on the Matchday page.
@@ -29,10 +29,17 @@ ledger_online = is_ledger_online()
 if not ledger_online:
     st.error("🔴 Ledger offline — Supabase is unreachable. Settlement is disabled until it recovers.")
 
-df = fetch_predictions()
+today = pd.Timestamp.now(tz="UTC")
+season_start = pd.Timestamp(year=today.year if today.month >= 8 else today.year - 1, month=8, day=1, tz="UTC")
+
+# Scoped by match_date (the actual fixture date), not created_at / a row
+# count -- fetch_predictions's old 500-most-recent-logged cap could
+# silently drop earlier-season fixtures behind more recent pipeline
+# runs while still showing a count that looked complete.
+df = fetch_predictions_since(season_start)
 
 if df.empty:
-    st.info("No ledger entries yet. Run the pipeline on the **Matchday** page.")
+    st.info("No predictions logged this season yet. Run the pipeline on the **Matchday** page.")
     st.stop()
 
 df["created_at"] = pd.to_datetime(df["created_at"])
@@ -42,7 +49,7 @@ df["staked"] = df["stake_shadow"].fillna(0) > 0
 # fixture only ever inserts into `settlements`, never touches `predictions`
 # — see write_settlement's docstring) — "settled" has to come from whether
 # a settlements row actually exists for this fixture, not from that column.
-settlements = latest_settlement_by_fixture()
+settlements = latest_settlement_by_fixture(limit=5000)
 settled_fixture_ids = set(settlements["fixture_id"]) if not settlements.empty else set()
 df["settled"] = df["fixture_id"].isin(settled_fixture_ids)
 
@@ -66,9 +73,6 @@ c3.metric("Pipeline runs", df["run_id"].nunique())
 
 st.divider()
 st.subheader("High Draw Likelihood vs. actual result (this season)")
-
-today = pd.Timestamp.now(tz="UTC")
-season_start = pd.Timestamp(year=today.year if today.month >= 8 else today.year - 1, month=8, day=1, tz="UTC")
 
 results_df = high_draw_likelihood_results(df, settlements, HIGH_TIE_P_DRAW, since=season_start)
 if results_df.empty:

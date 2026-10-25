@@ -253,6 +253,37 @@ def fetch_predictions(client=None, limit: int = 500) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def fetch_predictions_since(since: pd.Timestamp, client=None, limit: int = 5000) -> pd.DataFrame:
+    """Read every prediction with match_date on/after `since`, most
+    recent first. Unlike fetch_predictions (capped at the most
+    recent `limit` rows by created_at -- an audit-trail view that can
+    silently drop older-season rows behind more recent pipeline runs
+    while still showing a count that looks complete), this filters by
+    the actual fixture date, for season-scoped reporting (the Ledger
+    page's High Draw Likelihood tracker). Returns an empty DataFrame
+    (logged warning, never raises) if the client is unavailable or the
+    query fails."""
+    client = client or get_supabase_client()
+    if client is None:
+        return pd.DataFrame()
+
+    try:
+        resp = (
+            client.table("predictions")
+            .select("*")
+            .gte("match_date", since.isoformat())
+            .order("match_date", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = resp.data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Supabase season predictions read failed: %s", exc)
+        return pd.DataFrame()
+
+    return pd.DataFrame(rows)
+
+
 # Columns app.py's Matchday page actually reads (public cards plus the
 # admin-only shadow-stake expander, which reads from this same frame —
 # stake_shadow/ev_entry are gated by is_admin() in the UI, not excluded

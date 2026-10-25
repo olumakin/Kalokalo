@@ -8,6 +8,7 @@ from src.tracking.supabase_ledger import (
     fetch_gate_status,
     fetch_latest_predictions,
     fetch_predictions,
+    fetch_predictions_since,
     fetch_settlements,
     get_supabase_client,
     high_draw_likelihood_results,
@@ -148,6 +149,26 @@ class TestFetchPredictions:
         client = MagicMock()
         client.table().select().order().limit().execute.side_effect = RuntimeError("network blocked")
         assert fetch_predictions(client=client).empty
+
+
+class TestFetchPredictionsSince:
+    def test_no_client_returns_empty_dataframe(self):
+        assert fetch_predictions_since(pd.Timestamp("2026-08-01", tz="UTC"), client=None).empty
+
+    def test_filters_by_match_date_not_a_row_count(self):
+        client = MagicMock()
+        client.table().select().gte().order().limit().execute.return_value = MagicMock(data=[
+            {"fixture_id": "a", "match_date": "2026-09-01"},
+            {"fixture_id": "b", "match_date": "2026-10-01"},
+        ])
+        result = fetch_predictions_since(pd.Timestamp("2026-08-01", tz="UTC"), client=client)
+        assert len(result) == 2
+        client.table().select().gte.assert_called_with("match_date", "2026-08-01T00:00:00+00:00")
+
+    def test_query_failure_returns_empty_dataframe_not_raise(self):
+        client = MagicMock()
+        client.table().select().gte().order().limit().execute.side_effect = RuntimeError("network blocked")
+        assert fetch_predictions_since(pd.Timestamp("2026-08-01", tz="UTC"), client=client).empty
 
 
 class TestFetchLatestPredictions:
