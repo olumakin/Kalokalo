@@ -9,6 +9,7 @@ from src.tracking.supabase_ledger import (
     fetch_predictions,
     fetch_settlements,
     get_supabase_client,
+    historical_hit_rate,
     is_ledger_online,
     latest_settlement_by_fixture,
     prediction_row_from_pipeline,
@@ -276,6 +277,62 @@ class TestLatestSettlementByFixture:
         assert len(result) == 2
         row_a = result[result["fixture_id"] == "a"].iloc[0]
         assert row_a["home_goals"] == 1  # the later (corrective) settlement, not the first
+
+
+class TestHistoricalHitRate:
+    def _predictions(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"fixture_id": "f1", "league": "E0", "p_draw": 0.30},  # above threshold
+            {"fixture_id": "f2", "league": "E0", "p_draw": 0.32},  # above threshold
+            {"fixture_id": "f3", "league": "E0", "p_draw": 0.10},  # below threshold -- excluded
+            {"fixture_id": "f4", "league": "I1", "p_draw": 0.28},  # above threshold
+            {"fixture_id": "f5", "league": "I1", "p_draw": 0.29},  # above threshold, unsettled
+        ])
+
+    def _settlements(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"fixture_id": "f1", "actual_result": "D"},
+            {"fixture_id": "f2", "actual_result": "H"},
+            {"fixture_id": "f3", "actual_result": "D"},
+            {"fixture_id": "f4", "actual_result": "D"},
+            # f5 deliberately has no settlement row -- unsettled, must be excluded.
+        ])
+
+    def test_empty_predictions_returns_empty_with_expected_columns(self):
+        result = historical_hit_rate(pd.DataFrame(), self._settlements(), p_draw_threshold=0.275)
+        assert result.empty
+        assert list(result.columns) == ["league", "n", "hits", "hit_rate"]
+
+    def test_empty_settlements_returns_empty(self):
+        result = historical_hit_rate(self._predictions(), pd.DataFrame(), p_draw_threshold=0.275)
+        assert result.empty
+
+    def test_unsettled_fixtures_are_excluded(self):
+        result = historical_hit_rate(self._predictions(), self._settlements(), p_draw_threshold=0.275)
+        # f5 (I1, above threshold, no settlement) must not count toward I1's n.
+        i1 = result[result["league"] == "I1"].iloc[0]
+        assert i1["n"] == 1
+
+    def test_below_threshold_fixtures_are_excluded(self):
+        result = historical_hit_rate(self._predictions(), self._settlements(), p_draw_threshold=0.275)
+        # f3 (E0, p_draw=0.10, actually a draw) must not count -- below threshold,
+        # so E0's hits shouldn't include it even though it was a real draw.
+        e0 = result[result["league"] == "E0"].iloc[0]
+        assert e0["n"] == 2  # f1, f2 only
+        assert e0["hits"] == 1  # f1 only (f2 was "H")
+
+    def test_hit_rate_computed_correctly_per_league(self):
+        result = historical_hit_rate(self._predictions(), self._settlements(), p_draw_threshold=0.275)
+        e0 = result[result["league"] == "E0"].iloc[0]
+        i1 = result[result["league"] == "I1"].iloc[0]
+        assert e0["hit_rate"] == pytest.approx(0.5)  # 1 of 2
+        assert i1["hit_rate"] == pytest.approx(1.0)  # 1 of 1
+
+    def test_no_fixture_clears_the_threshold_returns_empty(self):
+        predictions = pd.DataFrame([{"fixture_id": "f1", "league": "E0", "p_draw": 0.10}])
+        settlements = pd.DataFrame([{"fixture_id": "f1", "actual_result": "D"}])
+        result = historical_hit_rate(predictions, settlements, p_draw_threshold=0.275)
+        assert result.empty
 
 
 class TestPredictionRowFromPipeline:

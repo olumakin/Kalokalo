@@ -364,3 +364,27 @@ def fetch_gate_status(client=None) -> dict[str, dict[str, Any]]:
         return {}
 
     return {row["league_code"]: row for row in rows}
+
+
+def historical_hit_rate(predictions: pd.DataFrame, settlements: pd.DataFrame, p_draw_threshold: float) -> pd.DataFrame:
+    """High Draw Likelihood forecast vs. actual result, by league, for
+    every settled fixture in `predictions` (joined to `settlements` by
+    fixture_id). One row per league with n (settled fixtures forecast
+    at or above p_draw_threshold), hits (how many were actually a
+    draw), and hit_rate. Empty DataFrame (same columns) if nothing
+    qualifies -- callers should treat that as "no data yet", not show
+    a rate.
+    """
+    columns = ["league", "n", "hits", "hit_rate"]
+    if predictions.empty or settlements.empty:
+        return pd.DataFrame(columns=columns)
+
+    resolved = predictions.merge(settlements[["fixture_id", "actual_result"]], on="fixture_id", how="inner")
+    resolved["actual_is_draw"] = resolved["actual_result"] == "D"
+    high_draw = resolved[resolved["p_draw"] >= p_draw_threshold]
+    if high_draw.empty:
+        return pd.DataFrame(columns=columns)
+
+    by_league = high_draw.groupby("league")["actual_is_draw"].agg(n="size", hits="sum").reset_index()
+    by_league["hit_rate"] = by_league["hits"] / by_league["n"]
+    return by_league.sort_values("league").reset_index(drop=True)

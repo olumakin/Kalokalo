@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from src.tracking.supabase_ledger import (
-    fetch_predictions, is_ledger_online, latest_settlement_by_fixture, write_settlement,
+    fetch_predictions, historical_hit_rate, is_ledger_online, latest_settlement_by_fixture, write_settlement,
 )
 from src.webapp.auth import require_admin
 
@@ -14,6 +14,10 @@ require_admin()
 
 st.title("Prediction Ledger")
 st.caption("Every prediction the pipeline has generated, for post-hoc calibration and CLV audit.")
+
+# Must match app.py's HIGH_TIE_P_DRAW -- the same threshold driving the
+# "HIGH DRAW LIKELIHOOD" / "HIGH TIE POTENTIAL" badge on the Matchday page.
+HIGH_TIE_P_DRAW = 0.275
 
 ledger_online = is_ledger_online()
 if not ledger_online:
@@ -53,6 +57,29 @@ c1, c2, c3 = st.columns(3)
 c1.metric("Predictions logged", len(df))
 c2.metric("Shadow-staked", int(df["staked"].sum()))
 c3.metric("Pipeline runs", df["run_id"].nunique())
+
+# --------------------------------------------------------------------------
+# Historical hit rate — High Draw Likelihood forecast vs. actual result.
+# Covers every settled fixture within the ledger window fetched above
+# (fetch_predictions's `limit`, most recent first), not just whatever's
+# currently on the Matchday page -- it grows as more fixtures settle.
+# --------------------------------------------------------------------------
+st.divider()
+st.subheader("Historical hit rate: High Draw Likelihood vs. actual result")
+
+hit_rate_df = historical_hit_rate(df, settlements, HIGH_TIE_P_DRAW)
+if hit_rate_df.empty:
+    st.caption("No settled fixtures were forecast High Draw Likelihood yet.")
+else:
+    total_n = int(hit_rate_df["n"].sum())
+    total_hits = int(hit_rate_df["hits"].sum())
+    st.metric(
+        "Hit rate", f"{total_hits / total_n:.1%}",
+        help=f"{total_hits} of {total_n} settled High Draw Likelihood fixtures",
+    )
+    st.dataframe(
+        hit_rate_df.style.format({"hit_rate": "{:.1%}"}), use_container_width=True, hide_index=True,
+    )
 
 st.subheader(f"Ledger entries ({len(filtered)})")
 display_cols = [
