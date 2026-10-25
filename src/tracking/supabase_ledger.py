@@ -366,25 +366,27 @@ def fetch_gate_status(client=None) -> dict[str, dict[str, Any]]:
     return {row["league_code"]: row for row in rows}
 
 
-def historical_hit_rate(predictions: pd.DataFrame, settlements: pd.DataFrame, p_draw_threshold: float) -> pd.DataFrame:
-    """High Draw Likelihood forecast vs. actual result, by league, for
-    every settled fixture in `predictions` (joined to `settlements` by
-    fixture_id). One row per league with n (settled fixtures forecast
-    at or above p_draw_threshold), hits (how many were actually a
-    draw), and hit_rate. Empty DataFrame (same columns) if nothing
-    qualifies -- callers should treat that as "no data yet", not show
-    a rate.
+def high_draw_likelihood_results(
+    predictions: pd.DataFrame, settlements: pd.DataFrame, p_draw_threshold: float, since: pd.Timestamp | None = None,
+) -> pd.DataFrame:
+    """Every settled High Draw Likelihood fixture (p_draw >= p_draw_threshold),
+    one row per fixture, forecast next to the actual result. `since`
+    restricts to fixtures with match_date on/after that date (e.g. the
+    current season's start) when given. Empty DataFrame (same columns)
+    if nothing qualifies.
     """
-    columns = ["league", "n", "hits", "hit_rate"]
+    columns = ["match_date", "league", "home_id", "away_id", "p_draw", "actual_result", "was_draw"]
     if predictions.empty or settlements.empty:
         return pd.DataFrame(columns=columns)
 
     resolved = predictions.merge(settlements[["fixture_id", "actual_result"]], on="fixture_id", how="inner")
-    resolved["actual_is_draw"] = resolved["actual_result"] == "D"
-    high_draw = resolved[resolved["p_draw"] >= p_draw_threshold]
+    resolved["match_date"] = pd.to_datetime(resolved["match_date"], utc=True)
+    if since is not None:
+        resolved = resolved[resolved["match_date"] >= since]
+
+    high_draw = resolved[resolved["p_draw"] >= p_draw_threshold].copy()
     if high_draw.empty:
         return pd.DataFrame(columns=columns)
 
-    by_league = high_draw.groupby("league")["actual_is_draw"].agg(n="size", hits="sum").reset_index()
-    by_league["hit_rate"] = by_league["hits"] / by_league["n"]
-    return by_league.sort_values("league").reset_index(drop=True)
+    high_draw["was_draw"] = high_draw["actual_result"] == "D"
+    return high_draw[columns].sort_values("match_date", ascending=False).reset_index(drop=True)

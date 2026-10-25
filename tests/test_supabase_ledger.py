@@ -9,7 +9,7 @@ from src.tracking.supabase_ledger import (
     fetch_predictions,
     fetch_settlements,
     get_supabase_client,
-    historical_hit_rate,
+    high_draw_likelihood_results,
     is_ledger_online,
     latest_settlement_by_fixture,
     prediction_row_from_pipeline,
@@ -279,14 +279,21 @@ class TestLatestSettlementByFixture:
         assert row_a["home_goals"] == 1  # the later (corrective) settlement, not the first
 
 
-class TestHistoricalHitRate:
+class TestHighDrawLikelihoodResults:
     def _predictions(self) -> pd.DataFrame:
         return pd.DataFrame([
-            {"fixture_id": "f1", "league": "E0", "p_draw": 0.30},  # above threshold
-            {"fixture_id": "f2", "league": "E0", "p_draw": 0.32},  # above threshold
-            {"fixture_id": "f3", "league": "E0", "p_draw": 0.10},  # below threshold -- excluded
-            {"fixture_id": "f4", "league": "I1", "p_draw": 0.28},  # above threshold
-            {"fixture_id": "f5", "league": "I1", "p_draw": 0.29},  # above threshold, unsettled
+            {"fixture_id": "f1", "league": "E0", "home_id": "ARS", "away_id": "CHE",
+             "p_draw": 0.30, "match_date": "2026-09-20"},  # above threshold
+            {"fixture_id": "f2", "league": "E0", "home_id": "HUL", "away_id": "BRE",
+             "p_draw": 0.32, "match_date": "2026-09-21"},  # above threshold
+            {"fixture_id": "f3", "league": "E0", "home_id": "MUN", "away_id": "AVL",
+             "p_draw": 0.10, "match_date": "2026-09-22"},  # below threshold -- excluded
+            {"fixture_id": "f4", "league": "I1", "home_id": "MIL", "away_id": "BOL",
+             "p_draw": 0.28, "match_date": "2026-09-23"},  # above threshold
+            {"fixture_id": "f5", "league": "I1", "home_id": "ROM", "away_id": "NAP",
+             "p_draw": 0.29, "match_date": "2026-09-24"},  # above threshold, unsettled
+            {"fixture_id": "f6", "league": "E0", "home_id": "TOT", "away_id": "WHU",
+             "p_draw": 0.31, "match_date": "2025-05-01"},  # above threshold, pre-season cutoff
         ])
 
     def _settlements(self) -> pd.DataFrame:
@@ -295,43 +302,53 @@ class TestHistoricalHitRate:
             {"fixture_id": "f2", "actual_result": "H"},
             {"fixture_id": "f3", "actual_result": "D"},
             {"fixture_id": "f4", "actual_result": "D"},
+            {"fixture_id": "f6", "actual_result": "D"},
             # f5 deliberately has no settlement row -- unsettled, must be excluded.
         ])
 
     def test_empty_predictions_returns_empty_with_expected_columns(self):
-        result = historical_hit_rate(pd.DataFrame(), self._settlements(), p_draw_threshold=0.275)
+        result = high_draw_likelihood_results(pd.DataFrame(), self._settlements(), p_draw_threshold=0.275)
         assert result.empty
-        assert list(result.columns) == ["league", "n", "hits", "hit_rate"]
+        assert list(result.columns) == ["match_date", "league", "home_id", "away_id", "p_draw", "actual_result", "was_draw"]
 
     def test_empty_settlements_returns_empty(self):
-        result = historical_hit_rate(self._predictions(), pd.DataFrame(), p_draw_threshold=0.275)
+        result = high_draw_likelihood_results(self._predictions(), pd.DataFrame(), p_draw_threshold=0.275)
         assert result.empty
 
     def test_unsettled_fixtures_are_excluded(self):
-        result = historical_hit_rate(self._predictions(), self._settlements(), p_draw_threshold=0.275)
-        # f5 (I1, above threshold, no settlement) must not count toward I1's n.
-        i1 = result[result["league"] == "I1"].iloc[0]
-        assert i1["n"] == 1
+        result = high_draw_likelihood_results(self._predictions(), self._settlements(), p_draw_threshold=0.275)
+        # f5 (above threshold, no settlement row) must not appear at all.
+        assert not ((result["home_id"] == "ROM") & (result["away_id"] == "NAP")).any()
 
     def test_below_threshold_fixtures_are_excluded(self):
-        result = historical_hit_rate(self._predictions(), self._settlements(), p_draw_threshold=0.275)
-        # f3 (E0, p_draw=0.10, actually a draw) must not count -- below threshold,
-        # so E0's hits shouldn't include it even though it was a real draw.
-        e0 = result[result["league"] == "E0"].iloc[0]
-        assert e0["n"] == 2  # f1, f2 only
-        assert e0["hits"] == 1  # f1 only (f2 was "H")
+        result = high_draw_likelihood_results(self._predictions(), self._settlements(), p_draw_threshold=0.275)
+        # f3 (p_draw=0.10, actually a draw) must not appear -- below threshold.
+        assert not ((result["home_id"] == "MUN") & (result["away_id"] == "AVL")).any()
 
-    def test_hit_rate_computed_correctly_per_league(self):
-        result = historical_hit_rate(self._predictions(), self._settlements(), p_draw_threshold=0.275)
-        e0 = result[result["league"] == "E0"].iloc[0]
-        i1 = result[result["league"] == "I1"].iloc[0]
-        assert e0["hit_rate"] == pytest.approx(0.5)  # 1 of 2
-        assert i1["hit_rate"] == pytest.approx(1.0)  # 1 of 1
+    def test_was_draw_flag_matches_actual_result(self):
+        result = high_draw_likelihood_results(self._predictions(), self._settlements(), p_draw_threshold=0.275)
+        f1 = result[(result["home_id"] == "ARS") & (result["away_id"] == "CHE")].iloc[0]
+        f2 = result[(result["home_id"] == "HUL") & (result["away_id"] == "BRE")].iloc[0]
+        assert f1["was_draw"] == True  # noqa: E712
+        assert f2["was_draw"] == False  # noqa: E712
+
+    def test_since_filters_out_fixtures_before_the_cutoff(self):
+        result = high_draw_likelihood_results(
+            self._predictions(), self._settlements(), p_draw_threshold=0.275,
+            since=pd.Timestamp("2026-08-01", tz="UTC"),
+        )
+        # f6 (2025-05-01, above threshold, settled) is before the cutoff -- excluded.
+        assert not ((result["home_id"] == "TOT") & (result["away_id"] == "WHU")).any()
+
+    def test_no_since_includes_everything_regardless_of_date(self):
+        result = high_draw_likelihood_results(self._predictions(), self._settlements(), p_draw_threshold=0.275)
+        assert ((result["home_id"] == "TOT") & (result["away_id"] == "WHU")).any()
 
     def test_no_fixture_clears_the_threshold_returns_empty(self):
-        predictions = pd.DataFrame([{"fixture_id": "f1", "league": "E0", "p_draw": 0.10}])
+        predictions = pd.DataFrame([{"fixture_id": "f1", "league": "E0", "home_id": "A", "away_id": "B",
+                                      "p_draw": 0.10, "match_date": "2026-09-20"}])
         settlements = pd.DataFrame([{"fixture_id": "f1", "actual_result": "D"}])
-        result = historical_hit_rate(predictions, settlements, p_draw_threshold=0.275)
+        result = high_draw_likelihood_results(predictions, settlements, p_draw_threshold=0.275)
         assert result.empty
 
 
