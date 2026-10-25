@@ -390,3 +390,63 @@ def high_draw_likelihood_results(
 
     high_draw["was_draw"] = high_draw["actual_result"] == "D"
     return high_draw[columns].sort_values("match_date", ascending=False).reset_index(drop=True)
+
+
+AUTO_SETTLED_BY = "auto:football-data.co.uk"
+
+
+def auto_settle_predictions(
+    predictions: pd.DataFrame,
+    settled_fixture_ids: set,
+    recent_results: pd.DataFrame,
+    as_of: pd.Timestamp | None = None,
+) -> list[dict]:
+    """Match unsettled, past-dated predictions against recent_results
+    (src.ingestion.historical.fetch_recent_results's output: date/
+    league/home_team/away_team/home_goals/away_goals/result) by
+    (league, home team, away team, calendar date). Returns settlement
+    dicts ready for write_settlement -- this only computes the match,
+    it doesn't write anything, so the caller decides whether/when to
+    persist. A fixture whose date has passed but isn't in
+    recent_results yet (the source hasn't published it) is simply left
+    out, not treated as an error.
+    """
+    if predictions.empty or recent_results.empty:
+        return []
+
+    as_of = as_of or pd.Timestamp.now(tz="UTC")
+    candidates = predictions[~predictions["fixture_id"].isin(settled_fixture_ids)].copy()
+    candidates["match_date"] = pd.to_datetime(candidates["match_date"], utc=True)
+    candidates = candidates[candidates["match_date"] < as_of]
+    if candidates.empty:
+        return []
+    candidates["match_day"] = candidates["match_date"].dt.date
+
+    results = recent_results.copy()
+    results["date"] = pd.to_datetime(results["date"], utc=True)
+    results["match_day"] = results["date"].dt.date
+
+    merged = candidates.merge(
+        results[["league", "home_team", "away_team", "match_day", "home_goals", "away_goals", "result"]],
+        left_on=["league", "home_id", "away_id", "match_day"],
+        right_on=["league", "home_team", "away_team", "match_day"],
+        how="inner",
+    )
+    if merged.empty:
+        return []
+
+    # The same fixture can appear more than once in `predictions` (a
+    # re-run against the same card) -- one settlement per fixture is
+    # enough, not one per prediction row.
+    merged = merged.drop_duplicates(subset="fixture_id")
+
+    return [
+        {
+            "fixture_id": row["fixture_id"],
+            "home_goals": int(row["home_goals"]),
+            "away_goals": int(row["away_goals"]),
+            "actual_result": row["result"],
+            "settled_by": AUTO_SETTLED_BY,
+        }
+        for _, row in merged.iterrows()
+    ]

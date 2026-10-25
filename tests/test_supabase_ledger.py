@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from src.tracking.supabase_ledger import (
+    auto_settle_predictions,
     fetch_gate_status,
     fetch_latest_predictions,
     fetch_predictions,
@@ -350,6 +351,65 @@ class TestHighDrawLikelihoodResults:
         settlements = pd.DataFrame([{"fixture_id": "f1", "actual_result": "D"}])
         result = high_draw_likelihood_results(predictions, settlements, p_draw_threshold=0.275)
         assert result.empty
+
+
+class TestAutoSettlePredictions:
+    AS_OF = pd.Timestamp("2026-10-25", tz="UTC")
+
+    def _predictions(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            # Past, unsettled, has a matching recent result -- should settle.
+            {"fixture_id": "f1", "league": "E0", "home_id": "ARS", "away_id": "CHE", "match_date": "2026-10-20"},
+            # Already settled -- must be skipped even though a result exists.
+            {"fixture_id": "f2", "league": "E0", "home_id": "HUL", "away_id": "BRE", "match_date": "2026-10-21"},
+            # Past, unsettled, but no matching row in recent_results (not yet published) -- skipped.
+            {"fixture_id": "f3", "league": "E0", "home_id": "MUN", "away_id": "AVL", "match_date": "2026-10-22"},
+            # Not yet played (match_date in the future relative to AS_OF) -- must never settle.
+            {"fixture_id": "f4", "league": "I1", "home_id": "MIL", "away_id": "BOL", "match_date": "2026-10-31"},
+        ])
+
+    def _recent_results(self) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"date": "2026-10-20", "league": "E0", "home_team": "ARS", "away_team": "CHE",
+             "home_goals": 2, "away_goals": 2, "result": "D"},
+            {"date": "2026-10-21", "league": "E0", "home_team": "HUL", "away_team": "BRE",
+             "home_goals": 1, "away_goals": 0, "result": "H"},
+        ])
+
+    def test_empty_predictions_returns_empty(self):
+        assert auto_settle_predictions(pd.DataFrame(), set(), self._recent_results(), as_of=self.AS_OF) == []
+
+    def test_empty_recent_results_returns_empty(self):
+        assert auto_settle_predictions(self._predictions(), set(), pd.DataFrame(), as_of=self.AS_OF) == []
+
+    def test_matches_past_unsettled_fixture_with_a_recent_result(self):
+        out = auto_settle_predictions(self._predictions(), set(), self._recent_results(), as_of=self.AS_OF)
+        f1 = next(s for s in out if s["fixture_id"] == "f1")
+        assert f1["home_goals"] == 2 and f1["away_goals"] == 2 and f1["actual_result"] == "D"
+        assert f1["settled_by"] == "auto:football-data.co.uk"
+
+    def test_already_settled_fixture_is_skipped(self):
+        out = auto_settle_predictions(self._predictions(), {"f2"}, self._recent_results(), as_of=self.AS_OF)
+        assert not any(s["fixture_id"] == "f2" for s in out)
+
+    def test_fixture_with_no_matching_result_is_skipped(self):
+        out = auto_settle_predictions(self._predictions(), set(), self._recent_results(), as_of=self.AS_OF)
+        assert not any(s["fixture_id"] == "f3" for s in out)
+
+    def test_future_fixture_is_never_settled_even_if_a_result_happens_to_match(self):
+        recent_results = pd.concat([self._recent_results(), pd.DataFrame([
+            {"date": "2026-10-31", "league": "I1", "home_team": "MIL", "away_team": "BOL",
+             "home_goals": 1, "away_goals": 1, "result": "D"},
+        ])], ignore_index=True)
+        out = auto_settle_predictions(self._predictions(), set(), recent_results, as_of=self.AS_OF)
+        assert not any(s["fixture_id"] == "f4" for s in out)
+
+    def test_duplicate_prediction_rows_for_the_same_fixture_settle_once(self):
+        predictions = pd.concat([self._predictions(), pd.DataFrame([
+            {"fixture_id": "f1", "league": "E0", "home_id": "ARS", "away_id": "CHE", "match_date": "2026-10-20"},
+        ])], ignore_index=True)
+        out = auto_settle_predictions(predictions, set(), self._recent_results(), as_of=self.AS_OF)
+        assert sum(1 for s in out if s["fixture_id"] == "f1") == 1
 
 
 class TestPredictionRowFromPipeline:

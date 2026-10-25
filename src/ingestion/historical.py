@@ -108,3 +108,50 @@ def load_all(
         return pd.DataFrame(columns=RAW_COLUMNS + ["league", "season"])
 
     return pd.concat(frames, ignore_index=True)
+
+
+def current_season_code(as_of: pd.Timestamp | None = None) -> str:
+    """football-data.co.uk season code for whichever season is current
+    (Aug-May) as of `as_of` (default: now) -- e.g. '2627' for the
+    2026/27 season from August 2026 through May 2027."""
+    as_of = as_of or pd.Timestamp.now(tz="UTC")
+    start_year = as_of.year if as_of.month >= 8 else as_of.year - 1
+    return season_codes(start_year, start_year)[0]
+
+
+def fetch_recent_results(leagues: list[str], settings: dict, as_of: pd.Timestamp | None = None) -> pd.DataFrame:
+    """Freshly re-fetch (bypassing the on-disk cache) the current
+    season's results for `leagues`, normalized the same way
+    load_historical_matches's output is (src.ingestion.normalizer
+    .normalize_dataframe -- date/league/home_team/away_team/
+    home_goals/away_goals/result, result in {"H","D","A"}).
+
+    download_league_season's cache never refreshes an already-downloaded
+    season file -- correct for a finished season (immutable), wrong for
+    the current one, which gains a new result every matchday. This is
+    the one place that deliberately bypasses it (force=True), so
+    auto-settlement (src.tracking.supabase_ledger.auto_settle_predictions)
+    actually sees recently-played matches instead of whatever the season
+    file looked like the first time it was downloaded.
+    """
+    from src.ingestion.normalizer import normalize_dataframe
+
+    season = current_season_code(as_of)
+    cache_dir = Path(settings["data_source"]["cache_dir"])
+    base_url = settings["data_source"]["historical_base_url"]
+
+    frames = []
+    for league in leagues:
+        df = download_league_season(league, season, cache_dir, base_url, force=True)
+        if df is None or df.empty:
+            continue
+        df = df.copy()
+        df["league"] = league
+        df["season"] = season
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(columns=["date", "league", "season", "home_team", "away_team", "home_goals", "away_goals", "result"])
+
+    raw = pd.concat(frames, ignore_index=True)
+    return normalize_dataframe(raw)

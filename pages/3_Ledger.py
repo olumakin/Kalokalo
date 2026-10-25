@@ -4,8 +4,14 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from src.ingestion.historical import fetch_recent_results, load_settings
 from src.tracking.supabase_ledger import (
-    fetch_predictions, high_draw_likelihood_results, is_ledger_online, latest_settlement_by_fixture, write_settlement,
+    auto_settle_predictions,
+    fetch_predictions,
+    high_draw_likelihood_results,
+    is_ledger_online,
+    latest_settlement_by_fixture,
+    write_settlement,
 )
 from src.webapp.auth import require_admin
 
@@ -109,6 +115,20 @@ st.download_button(
 # --------------------------------------------------------------------------
 # Settlement — appends to `settlements`, never touches `predictions`.
 # --------------------------------------------------------------------------
+st.divider()
+st.subheader("Auto-settle finished fixtures")
+st.caption("Pulls recent results from football-data.co.uk and settles any fixture whose match date has passed.")
+
+if st.button("Check for results", disabled=not ledger_online):
+    recent_results = fetch_recent_results(leagues, load_settings())
+    to_settle = auto_settle_predictions(df, settled_fixture_ids, recent_results)
+    if not to_settle:
+        st.info("No new results to settle.")
+    else:
+        settled = sum(write_settlement(**s) for s in to_settle)
+        st.success(f"Settled {settled} of {len(to_settle)} fixtures.")
+        st.rerun()
+
 st.divider()
 st.subheader("Reconcile an outcome")
 st.caption(
