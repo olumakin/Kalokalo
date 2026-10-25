@@ -13,7 +13,9 @@ from src.tracking.supabase_ledger import (
     get_supabase_client,
     high_draw_likelihood_results,
     is_ledger_online,
+    latest_forecast_per_match,
     latest_settlement_by_fixture,
+    ledger_export,
     prediction_row_from_pipeline,
     write_predictions,
     write_settlement,
@@ -431,6 +433,58 @@ class TestAutoSettlePredictions:
         ])], ignore_index=True)
         out = auto_settle_predictions(predictions, set(), self._recent_results(), as_of=self.AS_OF)
         assert sum(1 for s in out if s["fixture_id"] == "f1") == 1
+
+
+class TestLatestForecastPerMatch:
+    def test_empty_returns_empty(self):
+        assert latest_forecast_per_match(pd.DataFrame()).empty
+
+    def test_keeps_only_the_most_recent_row_per_fixture(self):
+        predictions = pd.DataFrame([
+            {"fixture_id": "f1", "created_at": "2026-10-20T09:00:00Z", "p_draw": 0.25},
+            {"fixture_id": "f1", "created_at": "2026-10-22T09:00:00Z", "p_draw": 0.30},
+            {"fixture_id": "f1", "created_at": "2026-10-21T09:00:00Z", "p_draw": 0.28},
+            {"fixture_id": "f2", "created_at": "2026-10-20T09:00:00Z", "p_draw": 0.20},
+        ])
+        result = latest_forecast_per_match(predictions)
+        assert len(result) == 2
+        f1 = result[result["fixture_id"] == "f1"].iloc[0]
+        assert f1["p_draw"] == pytest.approx(0.30)  # the 10-22 row, not the earlier two
+
+    def test_nine_repeats_of_one_match_collapse_to_one_row(self):
+        # Mirrors the real-world pattern this was built for: a fixture
+        # re-predicted on every pipeline run while it's still upcoming.
+        predictions = pd.DataFrame([
+            {"fixture_id": "f1", "created_at": f"2026-10-{10+i:02d}T09:00:00Z", "p_draw": 0.2 + i * 0.01}
+            for i in range(9)
+        ])
+        result = latest_forecast_per_match(predictions)
+        assert len(result) == 1
+
+
+class TestLedgerExport:
+    def test_merges_settled_result_onto_the_latest_forecast(self):
+        predictions = pd.DataFrame([
+            {"fixture_id": "f1", "created_at": "2026-10-20T09:00:00Z", "league": "E0", "p_draw": 0.30},
+            {"fixture_id": "f2", "created_at": "2026-10-21T09:00:00Z", "league": "E0", "p_draw": 0.25},
+        ])
+        settlements = pd.DataFrame([
+            {"fixture_id": "f1", "home_goals": 1, "away_goals": 1, "actual_result": "D"},
+        ])
+        result = ledger_export(predictions, settlements)
+        assert len(result) == 2  # f2 kept even though it's unsettled
+        f1 = result[result["fixture_id"] == "f1"].iloc[0]
+        f2 = result[result["fixture_id"] == "f2"].iloc[0]
+        assert f1["actual_result"] == "D"
+        assert pd.isna(f2["actual_result"])
+
+    def test_empty_settlements_still_returns_deduplicated_forecasts(self):
+        predictions = pd.DataFrame([
+            {"fixture_id": "f1", "created_at": "2026-10-20T09:00:00Z", "p_draw": 0.30},
+            {"fixture_id": "f1", "created_at": "2026-10-21T09:00:00Z", "p_draw": 0.32},
+        ])
+        result = ledger_export(predictions, pd.DataFrame())
+        assert len(result) == 1
 
 
 class TestPredictionRowFromPipeline:

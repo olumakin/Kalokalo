@@ -110,12 +110,19 @@ def load_all(
     return pd.concat(frames, ignore_index=True)
 
 
+def current_season_start(as_of: pd.Timestamp | None = None) -> pd.Timestamp:
+    """August 1st of whichever season is current (Aug-May) as of
+    `as_of` (default: now)."""
+    as_of = as_of or pd.Timestamp.now(tz="UTC")
+    start_year = as_of.year if as_of.month >= 8 else as_of.year - 1
+    return pd.Timestamp(year=start_year, month=8, day=1, tz="UTC")
+
+
 def current_season_code(as_of: pd.Timestamp | None = None) -> str:
     """football-data.co.uk season code for whichever season is current
     (Aug-May) as of `as_of` (default: now) -- e.g. '2627' for the
     2026/27 season from August 2026 through May 2027."""
-    as_of = as_of or pd.Timestamp.now(tz="UTC")
-    start_year = as_of.year if as_of.month >= 8 else as_of.year - 1
+    start_year = current_season_start(as_of).year
     return season_codes(start_year, start_year)[0]
 
 

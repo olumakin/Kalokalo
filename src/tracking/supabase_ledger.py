@@ -481,3 +481,32 @@ def auto_settle_predictions(
         }
         for _, row in merged.iterrows()
     ]
+
+
+def latest_forecast_per_match(predictions: pd.DataFrame) -> pd.DataFrame:
+    """One row per fixture_id -- the most recent prediction (by
+    created_at), not every pipeline run's repeat forecast for the same
+    still-upcoming match. A fixture gets re-predicted every time the
+    pipeline runs while it's still on the Matchday page, so the raw
+    ledger carries several rows per match (a median of ~9 observed in
+    practice) -- fine for an on-screen audit trail, but it means a
+    naive export is mostly duplicates rather than one-row-per-match
+    coverage."""
+    if predictions.empty:
+        return predictions
+    df = predictions.copy()
+    df["created_at"] = pd.to_datetime(df["created_at"])
+    return df.sort_values("created_at").drop_duplicates(subset="fixture_id", keep="last").reset_index(drop=True)
+
+
+def ledger_export(predictions: pd.DataFrame, settlements: pd.DataFrame) -> pd.DataFrame:
+    """latest_forecast_per_match's output with the actual result merged
+    in (home_goals/away_goals/actual_result, NaN/None if not yet
+    settled) -- the one-row-per-match, analysis-ready export."""
+    deduped = latest_forecast_per_match(predictions)
+    if deduped.empty or settlements.empty:
+        return deduped
+    return deduped.merge(
+        settlements[["fixture_id", "home_goals", "away_goals", "actual_result"]],
+        on="fixture_id", how="left", suffixes=("", "_actual"),
+    )

@@ -4,13 +4,14 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from src.ingestion.historical import fetch_recent_results, load_settings
+from src.ingestion.historical import current_season_start, fetch_recent_results, load_settings
 from src.tracking.supabase_ledger import (
     auto_settle_predictions,
     fetch_predictions_since,
     high_draw_likelihood_results,
     is_ledger_online,
     latest_settlement_by_fixture,
+    ledger_export,
     write_settlement,
 )
 from src.webapp.auth import require_admin
@@ -29,8 +30,7 @@ ledger_online = is_ledger_online()
 if not ledger_online:
     st.error("🔴 Ledger offline — Supabase is unreachable. Settlement is disabled until it recovers.")
 
-today = pd.Timestamp.now(tz="UTC")
-season_start = pd.Timestamp(year=today.year if today.month >= 8 else today.year - 1, month=8, day=1, tz="UTC")
+season_start = current_season_start()
 
 # Scoped by match_date (the actual fixture date), not created_at / a row
 # count -- fetch_predictions's old 500-most-recent-logged cap could
@@ -111,9 +111,16 @@ if "ev_entry" in display_cols:
 if "entry_draw" in display_cols:
     pct_fmt[friendly_names["entry_draw"]] = "{:.2f}"
 st.dataframe(ledger_display.style.format(pct_fmt), use_container_width=True, height=420)
-st.download_button(
-    "Download ledger (CSV)", filtered.to_csv(index=False).encode("utf-8"),
-    file_name="dvpe_ledger.csv", mime="text/csv",
+
+dl1, dl2 = st.columns(2)
+dl1.download_button(
+    "Download (CSV, one row per match)",
+    ledger_export(filtered, settlements).to_csv(index=False).encode("utf-8"),
+    file_name="dvpe_ledger_by_match.csv", mime="text/csv",
+)
+dl2.download_button(
+    "Download (CSV, every logged forecast)", filtered.to_csv(index=False).encode("utf-8"),
+    file_name="dvpe_ledger_all.csv", mime="text/csv",
 )
 
 # --------------------------------------------------------------------------
