@@ -307,17 +307,17 @@ class TestHighDrawLikelihoodResults:
     def _predictions(self) -> pd.DataFrame:
         return pd.DataFrame([
             {"fixture_id": "f1", "league": "E0", "home_id": "ARS", "away_id": "CHE",
-             "p_draw": 0.30, "match_date": "2026-09-20"},  # above threshold
+             "p_draw": 0.30, "match_date": "2026-09-20", "created_at": "2026-09-18T09:00:00Z"},  # above threshold
             {"fixture_id": "f2", "league": "E0", "home_id": "HUL", "away_id": "BRE",
-             "p_draw": 0.32, "match_date": "2026-09-21"},  # above threshold
+             "p_draw": 0.32, "match_date": "2026-09-21", "created_at": "2026-09-18T09:00:00Z"},  # above threshold
             {"fixture_id": "f3", "league": "E0", "home_id": "MUN", "away_id": "AVL",
-             "p_draw": 0.10, "match_date": "2026-09-22"},  # below threshold -- excluded
+             "p_draw": 0.10, "match_date": "2026-09-22", "created_at": "2026-09-18T09:00:00Z"},  # below threshold -- excluded
             {"fixture_id": "f4", "league": "I1", "home_id": "MIL", "away_id": "BOL",
-             "p_draw": 0.28, "match_date": "2026-09-23"},  # above threshold
+             "p_draw": 0.28, "match_date": "2026-09-23", "created_at": "2026-09-18T09:00:00Z"},  # above threshold
             {"fixture_id": "f5", "league": "I1", "home_id": "ROM", "away_id": "NAP",
-             "p_draw": 0.29, "match_date": "2026-09-24"},  # above threshold, unsettled
+             "p_draw": 0.29, "match_date": "2026-09-24", "created_at": "2026-09-18T09:00:00Z"},  # above threshold, unsettled
             {"fixture_id": "f6", "league": "E0", "home_id": "TOT", "away_id": "WHU",
-             "p_draw": 0.31, "match_date": "2025-05-01"},  # above threshold, pre-season cutoff
+             "p_draw": 0.31, "match_date": "2025-05-01", "created_at": "2025-04-28T09:00:00Z"},  # above threshold, pre-season cutoff
         ])
 
     def _settlements(self) -> pd.DataFrame:
@@ -370,10 +370,32 @@ class TestHighDrawLikelihoodResults:
 
     def test_no_fixture_clears_the_threshold_returns_empty(self):
         predictions = pd.DataFrame([{"fixture_id": "f1", "league": "E0", "home_id": "A", "away_id": "B",
-                                      "p_draw": 0.10, "match_date": "2026-09-20"}])
+                                      "p_draw": 0.10, "match_date": "2026-09-20", "created_at": "2026-09-18T09:00:00Z"}])
         settlements = pd.DataFrame([{"fixture_id": "f1", "actual_result": "D"}])
         result = high_draw_likelihood_results(predictions, settlements, p_draw_threshold=0.275)
         assert result.empty
+
+    def test_repeat_pipeline_runs_for_the_same_fixture_collapse_to_one_row(self):
+        # A fixture gets re-predicted every pipeline run while still
+        # upcoming -- without deduping, the same match would be counted
+        # once per run, inflating n (and, since p_draw drifts across
+        # runs, inconsistently in/out around the threshold).
+        predictions = pd.DataFrame([
+            {"fixture_id": "f1", "league": "SP1", "home_id": "GET", "away_id": "RAY",
+             "p_draw": 0.343, "match_date": "2026-10-19", "created_at": "2026-10-15T09:00:00Z"},
+            {"fixture_id": "f1", "league": "SP1", "home_id": "GET", "away_id": "RAY",
+             "p_draw": 0.343, "match_date": "2026-10-19", "created_at": "2026-10-16T09:00:00Z"},
+            {"fixture_id": "f1", "league": "SP1", "home_id": "GET", "away_id": "RAY",
+             "p_draw": 0.347, "match_date": "2026-10-19", "created_at": "2026-10-17T09:00:00Z"},
+            {"fixture_id": "f1", "league": "SP1", "home_id": "GET", "away_id": "RAY",
+             "p_draw": 0.343, "match_date": "2026-10-19", "created_at": "2026-10-18T09:00:00Z"},
+            {"fixture_id": "f1", "league": "SP1", "home_id": "GET", "away_id": "RAY",
+             "p_draw": 0.343, "match_date": "2026-10-19", "created_at": "2026-10-19T08:00:00Z"},
+        ])
+        settlements = pd.DataFrame([{"fixture_id": "f1", "actual_result": "D"}])
+        result = high_draw_likelihood_results(predictions, settlements, p_draw_threshold=0.275)
+        assert len(result) == 1
+        assert result.iloc[0]["p_draw"] == pytest.approx(0.343)  # the latest (2026-10-19) run's forecast
 
 
 class TestAutoSettlePredictions:

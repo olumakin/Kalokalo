@@ -405,12 +405,20 @@ def high_draw_likelihood_results(
     restricts to fixtures with match_date on/after that date (e.g. the
     current season's start) when given. Empty DataFrame (same columns)
     if nothing qualifies.
+
+    Dedupes `predictions` to latest_forecast_per_match first -- a
+    fixture gets re-predicted every pipeline run while still upcoming,
+    so the raw ledger otherwise counts the same match several times
+    (and, since p_draw can drift across runs, can inconsistently
+    include/exclude it around the threshold).
     """
     columns = ["match_date", "league", "home_id", "away_id", "p_draw", "actual_result", "was_draw"]
     if predictions.empty or settlements.empty:
         return pd.DataFrame(columns=columns)
 
-    resolved = predictions.merge(settlements[["fixture_id", "actual_result"]], on="fixture_id", how="inner")
+    resolved = latest_forecast_per_match(predictions).merge(
+        settlements[["fixture_id", "actual_result"]], on="fixture_id", how="inner",
+    )
     resolved["match_date"] = pd.to_datetime(resolved["match_date"], utc=True)
     if since is not None:
         resolved = resolved[resolved["match_date"] >= since]
