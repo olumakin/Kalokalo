@@ -112,7 +112,7 @@ if "entry_draw" in display_cols:
     pct_fmt[friendly_names["entry_draw"]] = "{:.2f}"
 st.dataframe(ledger_display.style.format(pct_fmt), use_container_width=True, height=420)
 
-dl1, dl2 = st.columns(2)
+dl1, dl2, dl3 = st.columns(3)
 dl1.download_button(
     "Download (CSV, one row per match)",
     ledger_export(filtered, settlements).to_csv(index=False).encode("utf-8"),
@@ -121,6 +121,12 @@ dl1.download_button(
 dl2.download_button(
     "Download (CSV, every logged forecast)", filtered.to_csv(index=False).encode("utf-8"),
     file_name="dvpe_ledger_all.csv", mime="text/csv",
+)
+dl3.download_button(
+    "Download (CSV, High Draw Likelihood cohort only)",
+    results_df.to_csv(index=False).encode("utf-8"),
+    file_name="dvpe_high_draw_likelihood.csv", mime="text/csv",
+    disabled=results_df.empty,
 )
 
 # --------------------------------------------------------------------------
