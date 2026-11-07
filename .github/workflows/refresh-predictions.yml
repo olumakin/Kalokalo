@@ -1,0 +1,26 @@
+name: Refresh predictions
+
+# Keeps the Matchday page from going stale between manual admin "Run
+# pipeline" clicks -- see scripts/refresh_predictions.py. Scheduled
+# workflows only fire from the repo's default branch; GitHub also
+# disables them after 60 days with no pushes to the repo.
+on:
+  schedule:
+    - cron: "23 6,18 * * *"  # 06:23 and 18:23 UTC
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m scripts.refresh_predictions
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
