@@ -155,6 +155,27 @@ def fetch_live_odds(
 FREE_FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"
 
 
+def _read_feed_csv(content: bytes) -> pd.DataFrame:
+    """football-data.co.uk has served this sheet both as Latin-1 and as
+    UTF-8 with a byte-order mark. Decoding a BOM'd file as Latin-1 turns
+    the first header into 'ï»¿Div', which fails the schema check below and
+    silently discards the whole sheet -- so UTF-8 (BOM-tolerant) first,
+    Latin-1 only if that fails."""
+    try:
+        return pd.read_csv(io.BytesIO(content), encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        return pd.read_csv(io.BytesIO(content), encoding="latin1")
+
+
+def _drop_past(df: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+    """Keep only fixtures dated today or later (day granularity, so an
+    earlier kickoff today still counts)."""
+    if df.empty:
+        return df
+    dates = pd.to_datetime(df["date"], utc=True, errors="coerce")
+    return df[dates.dt.date >= as_of.date()].reset_index(drop=True)
+
+
 def fetch_free_schedule(
     leagues: list[str], url: str | None = None, session: requests.Session | None = None,
     mappings: dict | None = None,
@@ -179,9 +200,7 @@ def fetch_free_schedule(
         sess = session or requests
         resp = sess.get(url, timeout=20)
         resp.raise_for_status()
-        # football-data.co.uk CSVs are Latin-1 (team names with accents);
-        # decode from raw bytes rather than trust response.text's guess.
-        raw = pd.read_csv(io.BytesIO(resp.content), encoding="latin1")
+        raw = _read_feed_csv(resp.content)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not fetch free fixture schedule: %s", exc)
         return empty
@@ -227,6 +246,7 @@ def get_upcoming_fixtures(
     leagues: list[str],
     api_key: str | None = None,
     fallback_path: str | Path = "data/fixtures/upcoming.csv",
+    as_of: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, str]:
     """Automatically fetch upcoming fixtures across `leagues` with no
     caller-side mode selection, trying three tiers in order and using
@@ -244,7 +264,13 @@ def get_upcoming_fixtures(
     src/ingestion — and stays UI-framework-agnostic (only `logging`, no
     `streamlit`) so it's unit-testable without a Streamlit runtime; the
     caller (app.py) decides how to surface the source to the user.
+
+    Fixtures dated before `as_of` (default: today) are dropped from every
+    tier, and a tier left with nothing falls through to the next. The
+    sample card's dates are fixed, so once they've passed it returns
+    empty rather than publishing months-old fixtures as the latest run.
     """
+    as_of = as_of or pd.Timestamp.now(tz="UTC")
     if api_key:
         frames = [fetch_live_odds(league, api_key=api_key) for league in leagues]
         frames = [f for f in frames if not f.empty]
@@ -252,9 +278,11 @@ def get_upcoming_fixtures(
             combined = pd.concat(frames, ignore_index=True)
             # fetch_live_odds returns The Odds API's own raw team-name
             # strings (e.g. "Manchester City"), not our canonical codes.
-            return normalize_fixture_dataframe(combined), FIXTURE_SOURCE_LIVE_ODDS
+            live = _drop_past(normalize_fixture_dataframe(combined), as_of)
+            if not live.empty:
+                return live, FIXTURE_SOURCE_LIVE_ODDS
 
-    free = fetch_free_schedule(leagues)
+    free = _drop_past(fetch_free_schedule(leagues), as_of)
     if not free.empty:
         return free, FIXTURE_SOURCE_FREE_SCHEDULE
 
@@ -266,4 +294,4 @@ def get_upcoming_fixtures(
     sample = load_fixture_csv(fallback_path)
     if not sample.empty:
         sample = sample[sample["league"].isin(leagues)].reset_index(drop=True)
-    return sample, FIXTURE_SOURCE_SAMPLE_CARD
+    return _drop_past(sample, as_of), FIXTURE_SOURCE_SAMPLE_CARD

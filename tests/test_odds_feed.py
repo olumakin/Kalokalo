@@ -45,6 +45,11 @@ SAMPLE_EVENT = {
 }
 
 
+# Before every fixture date used in this file, so the past-date filter in
+# get_upcoming_fixtures doesn't drop them.
+AS_OF = pd.Timestamp("2026-09-01", tz="UTC")
+
+
 def _session_returning(payload):
     session = Mock()
     session.get.return_value = Mock(json=Mock(return_value=payload), raise_for_status=Mock())
@@ -182,6 +187,24 @@ class TestFetchFreeSchedule:
         df = fetch_free_schedule(["D1"], session=session)
         assert df.empty
 
+    def test_utf8_with_byte_order_mark_is_parsed(self):
+        # The live sheet started arriving as UTF-8 with a BOM; decoded as
+        # Latin-1 the first header became 'ï»¿Div' and the whole sheet was
+        # discarded as an unexpected schema.
+        session = Mock()
+        content = b"\xef\xbb\xbf" + FREE_SCHEDULE_CSV.encode("utf-8")
+        session.get.return_value = Mock(content=content, raise_for_status=Mock())
+        df = fetch_free_schedule(["E0"], session=session)
+        assert len(df) == 1
+        assert df.iloc[0]["home_team"] == "ARS"
+
+    def test_latin1_with_accents_still_parsed(self):
+        session = Mock()
+        csv = FREE_SCHEDULE_CSV.replace("Real Madrid", "Atlético Madrid")
+        session.get.return_value = Mock(content=csv.encode("latin1"), raise_for_status=Mock())
+        df = fetch_free_schedule(["E0", "SP1"], session=session)
+        assert len(df) == 2
+
 
 class TestGetUpcomingFixtures:
     def test_uses_live_odds_when_available(self, monkeypatch, fallback_csv):
@@ -192,7 +215,7 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", lambda league, api_key=None: live_df)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
 
-        result, source = get_upcoming_fixtures(["E0"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv, as_of=AS_OF)
 
         assert source == FIXTURE_SOURCE_LIVE_ODDS
         assert len(result) == 1
@@ -205,7 +228,7 @@ class TestGetUpcomingFixtures:
         }])
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", lambda leagues, **k: free_df)
 
-        result, source = get_upcoming_fixtures(["E0"], api_key=None, fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0"], api_key=None, fallback_path=fallback_csv, as_of=AS_OF)
 
         assert source == FIXTURE_SOURCE_FREE_SCHEDULE
         assert len(result) == 1
@@ -218,7 +241,7 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", _empty_frames)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", lambda leagues, **k: free_df)
 
-        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv, as_of=AS_OF)
 
         assert source == FIXTURE_SOURCE_FREE_SCHEDULE
         assert len(result) == 1
@@ -227,7 +250,7 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", _empty_frames)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
 
-        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0", "SP1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv, as_of=AS_OF)
 
         assert source == FIXTURE_SOURCE_SAMPLE_CARD
         assert len(result) == 1  # from the fallback CSV, not an empty frame
@@ -244,7 +267,7 @@ class TestGetUpcomingFixtures:
         fake_get = Mock(return_value=resp)
         monkeypatch.setattr(odds_feed_mod.requests, "get", fake_get)
 
-        result, source = get_upcoming_fixtures(["E0"], api_key="invalid-key", fallback_path=fallback_csv)
+        result, source = get_upcoming_fixtures(["E0"], api_key="invalid-key", fallback_path=fallback_csv, as_of=AS_OF)
 
         assert source == FIXTURE_SOURCE_SAMPLE_CARD
         assert len(result) == 1
@@ -259,7 +282,7 @@ class TestGetUpcomingFixtures:
 
         monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", fake_fetch)
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
-        get_upcoming_fixtures(["E0", "SP1", "I1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv)
+        get_upcoming_fixtures(["E0", "SP1", "I1"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv, as_of=AS_OF)
         assert calls == ["E0", "SP1", "I1"]
 
     def test_sample_card_is_filtered_to_requested_leagues(self, monkeypatch, multi_league_fallback_csv):
@@ -271,7 +294,7 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
 
         result, source = get_upcoming_fixtures(
-            ["SP1", "I1"], api_key="test-key-1234567890abcdef", fallback_path=multi_league_fallback_csv,
+            ["SP1", "I1"], api_key="test-key-1234567890abcdef", fallback_path=multi_league_fallback_csv, as_of=AS_OF,
         )
 
         assert source == FIXTURE_SOURCE_SAMPLE_CARD
@@ -283,8 +306,49 @@ class TestGetUpcomingFixtures:
         monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
 
         result, source = get_upcoming_fixtures(
-            ["D1"], api_key="test-key-1234567890abcdef", fallback_path=multi_league_fallback_csv,
+            ["D1"], api_key="test-key-1234567890abcdef", fallback_path=multi_league_fallback_csv, as_of=AS_OF,
         )
 
         assert source == FIXTURE_SOURCE_SAMPLE_CARD
         assert result.empty
+
+    def test_sample_card_with_only_past_dates_returns_empty(self, monkeypatch, fallback_csv):
+        # The bundled card's dates are fixed; once they've passed it must
+        # come back empty so nothing stale gets published as the latest run.
+        monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", _empty_frames)
+        monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", _empty_frames)
+
+        result, source = get_upcoming_fixtures(
+            ["E0"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv,
+            as_of=pd.Timestamp("2026-11-20", tz="UTC"),
+        )
+
+        assert source == FIXTURE_SOURCE_SAMPLE_CARD
+        assert result.empty
+
+    def test_past_only_free_schedule_falls_through_to_next_tier(self, monkeypatch, fallback_csv):
+        past_free = pd.DataFrame([{
+            "date": pd.Timestamp("2026-08-01"), "league": "E0", "home_team": "ARS", "away_team": "CHE",
+            "odds_home": 2.1, "odds_draw": 3.6, "odds_away": 3.4,
+        }])
+        monkeypatch.setattr(odds_feed_mod, "fetch_free_schedule", lambda leagues, **k: past_free)
+
+        result, source = get_upcoming_fixtures(["E0"], api_key=None, fallback_path=fallback_csv, as_of=AS_OF)
+
+        assert source == FIXTURE_SOURCE_SAMPLE_CARD  # sample card's 2026-09-20 row is still upcoming at AS_OF
+        assert len(result) == 1
+
+    def test_fixture_earlier_today_is_kept(self, monkeypatch, fallback_csv):
+        live_df = pd.DataFrame([{
+            "date": "2026-09-01T12:00:00Z", "league": "E0", "home_team": "Arsenal", "away_team": "Bournemouth",
+            "odds_home": 1.8, "odds_draw": 3.9, "odds_away": 4.2, "n_bookmakers": 4,
+        }])
+        monkeypatch.setattr(odds_feed_mod, "fetch_live_odds", lambda league, api_key=None: live_df)
+
+        result, source = get_upcoming_fixtures(
+            ["E0"], api_key="test-key-1234567890abcdef", fallback_path=fallback_csv,
+            as_of=pd.Timestamp("2026-09-01T18:00:00Z"),
+        )
+
+        assert source == FIXTURE_SOURCE_LIVE_ODDS
+        assert len(result) == 1

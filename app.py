@@ -375,7 +375,10 @@ if admin and run_clicked:
         fixtures, fixture_source_used = _cached_upcoming_fixtures(tuple(fixture_leagues), odds_api_key)
 
     if fixtures.empty:
-        st.error("No fixtures available — live feed, free schedule, and the bundled fixture card all returned nothing.")
+        st.error(
+            "No upcoming fixtures from any source (live odds, free schedule, sample card). "
+            "Nothing was published — the Matchday page still shows the previous run."
+        )
         st.stop()
 
     predictions_out = build_predictions(fixtures, models, settings)
